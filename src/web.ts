@@ -160,12 +160,7 @@ function sleep(ms: number) { return new Promise((r) => setTimeout(r, ms)); }
  * - In browsers, provides a no-op/mock implementation for development and previews.
  */
 export class TCPClientWeb extends WebPlugin implements TCPClientPlugin {
-  /** iOS-like permission hint: in Electron this is delegated; on pure web it's a no-op. */
-  async requestLocalNetworkPermission(): Promise<BaseResult> {
-    if (electronApi) return electronApi.requestLocalNetworkPermission();
-    log('requestLocalNetworkPermission() – noop on web');
-    return ok();
-  }
+
 
   /** Open a TCP connection (delegated to Electron or mocked). */
   async tcpConnect(args: TcpConnectOptions): Promise<TcpConnectResult> {

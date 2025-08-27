@@ -62,39 +62,39 @@ export interface BaseResult {
 }
 
 /** Result for connect(). */
-export interface TcpConnectResult extends BaseResult {
+export type TcpConnectResult = BaseResult & {
   connected: boolean;
 }
 
 /** Result for write(). */
-export interface TcpWriteResult extends BaseResult {
+export type TcpWriteResult = BaseResult & {
   bytesWritten: number;
 }
 
 /** Result for writeAndRead(). */
-export interface TcpWriteAndReadResult extends BaseResult {
+export type TcpWriteAndReadResult = BaseResult & {
   bytesWritten: number;
   bytesRead: number;
   data: number[];
 }
 
 /** Result for start/stop read. */
-export interface TcpStartStopResult extends BaseResult {
+export type TcpStartStopResult = BaseResult & {
   reading: boolean;
 }
 
 /** Result for isConnected(). */
-export interface TcpIsConnectedResult extends BaseResult {
+export type TcpIsConnectedResult = BaseResult & {
   connected: boolean;
 }
 
 /** Result for disconnect(). */
-export interface TcpDisconnectResult extends BaseResult {
+export type TcpDisconnectResult = BaseResult & {
   disconnected: boolean;
 }
 
 /** Result for isReading(). */
-export interface TcpIsReadingResult extends BaseResult {
+export type TcpIsReadingResult = BaseResult & {
   reading: boolean;
 }
 
@@ -136,6 +136,7 @@ export interface TCPClientPlugin {
   tcpIsConnected(): Promise<TcpIsConnectedResult>;
   tcpDisconnect(): Promise<TcpDisconnectResult>;
   tcpIsReading(): Promise<TcpIsReadingResult>;
+  tcpSetReadTimeout(options: { ms: number }): Promise<BaseResult>;
 
   /*
    * Events

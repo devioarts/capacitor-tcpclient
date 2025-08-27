@@ -9,6 +9,11 @@ npm install @devioarts/capacitor-tcpclient
 npx cap sync
 ```
 
+## Android
+### CapacitorJS
+
+---
+
 
 ## iOS
 ### CapacitorJS
@@ -23,19 +28,90 @@ npx cap add ios --packagemanager SPM
 
 ```file:ios/App/App/Info.plist
 <key>NSLocalNetworkUsageDescription</key>
-<string>Local server/client connection</string>
+<string>TCPClient connection</string>
 <key>NSAppTransportSecurity</key>
 <dict>
   <key>NSAllowsLocalNetworking</key>
   <true/>
 </dict>
-<key>NSBonjourServices</key>
-<array>
-    <string>_http._tcp</string>
-    <string>_lancomm._tcp</string>
-</array>
+```
+---
+## ElectronJS
+### electron/main.ts
+
+```typescript
+import { app, BrowserWindow, session, ipcMain } from 'electron';
+import * as path from 'path';
+import * as url from 'url';
+// THIS IS IMPORTANT FOR TCPCLIENT!
+import {TCPClient} from "@devioarts/capacitor-tcpclient/electron/tcpclient";
+
+import express from 'express';
+import type { AddressInfo } from 'net';
+
+const isDev = !app.isPackaged;
+// THIS IS IMPORTANT FOR TCPCLIENT!
+let tcpClient: TCPClient | null = null;
+
+async function startLocalHttp(distDir: string): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const web = express();
+    web.use(express.static(distDir));
+    const server = web.listen(0, '127.0.0.1', () => {
+      const addr = server.address() as AddressInfo;
+      resolve(addr.port);
+    });
+    server.on('error', reject);
+  });
+}
+
+function createWindow() {
+  const win = new BrowserWindow({
+    fullscreen: true,
+    frame: false,
+    autoHideMenuBar: true,
+    webPreferences: {
+      contextIsolation: true,
+      preload: path.join(__dirname, 'preload.cjs'),
+      sandbox: false,
+    },
+  });
+  // THIS IS IMPORTANT FOR TCPCLIENT!
+  tcpClient = new TCPClient(win);
+
+  if (isDev) {
+    win.loadURL('http://localhost:8006'); //change to your port
+  } else {
+    const DIST_DIR = path.join(__dirname, '../dist');
+    startLocalHttp(DIST_DIR).then((port) => {
+      win.loadURL(`http://localhost:${port}/index.html`);
+    });
+  }
+  win.webContents.openDevTools();
+}
+
+app.whenReady().then(() => {
+  createWindow();
+});
+app.on('window-all-closed', () => {
+  if (process.platform !== 'darwin') app.quit();
+});
 ```
 
+### electron/preload.cjs
+```javascript
+const { contextBridge, ipcRenderer } = require("electron");
+// THIS IS IMPORTANT FOR TCPCLIENT!
+const {createTCPClientAPI} = require("@devioarts/capacitor-tcpclient/electron/tcpclient-bridge.cjs");
+
+window.addEventListener('DOMContentLoaded', () => {
+  console.log('Electron preload loaded');
+});
+
+// THIS IS IMPORTANT FOR TCPCLIENT!
+contextBridge.exposeInMainWorld('TCPClient', createTCPClientAPI({ ipcRenderer }));
+```
+---
 ## API
 
 <docgen-index>
@@ -48,6 +124,7 @@ npx cap add ios --packagemanager SPM
 * [`tcpIsConnected()`](#tcpisconnected)
 * [`tcpDisconnect()`](#tcpdisconnect)
 * [`tcpIsReading()`](#tcpisreading)
+* [`tcpSetReadTimeout(...)`](#tcpsetreadtimeout)
 * [`addListener('tcpData', ...)`](#addlistenertcpdata-)
 * [`addListener('tcpDisconnect', ...)`](#addlistenertcpdisconnect-)
 * [`removeAllListeners()`](#removealllisteners)
@@ -174,6 +251,21 @@ tcpIsReading() => Promise<TcpIsReadingResult>
 --------------------
 
 
+### tcpSetReadTimeout(...)
+
+```typescript
+tcpSetReadTimeout(options: { ms: number; }) => Promise<BaseResult>
+```
+
+| Param         | Type                         |
+| ------------- | ---------------------------- |
+| **`options`** | <code>{ ms: number; }</code> |
+
+**Returns:** <code>Promise&lt;<a href="#baseresult">BaseResult</a>&gt;</code>
+
+--------------------
+
+
 ### addListener('tcpData', ...)
 
 ```typescript
@@ -218,13 +310,14 @@ removeAllListeners() => Promise<void>
 ### Interfaces
 
 
-#### TcpConnectResult
+#### BaseResult
 
-Result for connect().
+Common result shape returned by all methods for predictable error handling.
 
-| Prop            | Type                 |
-| --------------- | -------------------- |
-| **`connected`** | <code>boolean</code> |
+| Prop               | Type                        |
+| ------------------ | --------------------------- |
+| **`error`**        | <code>boolean</code>        |
+| **`errorMessage`** | <code>string \| null</code> |
 
 
 #### TcpConnectOptions
@@ -246,15 +339,6 @@ Defaults:
 | **`timeoutMs`** | <code>number</code>  |
 | **`noDelay`**   | <code>boolean</code> |
 | **`keepAlive`** | <code>boolean</code> |
-
-
-#### TcpWriteResult
-
-Result for write().
-
-| Prop               | Type                |
-| ------------------ | ------------------- |
-| **`bytesWritten`** | <code>number</code> |
 
 
 #### TcpWriteOptions
@@ -342,17 +426,6 @@ buffer as needed.
 | **slice** | (begin: number, end?: number \| undefined) =&gt; <a href="#arraybuffer">ArrayBuffer</a> | Returns a section of an <a href="#arraybuffer">ArrayBuffer</a>. |
 
 
-#### TcpWriteAndReadResult
-
-Result for writeAndRead().
-
-| Prop               | Type                  |
-| ------------------ | --------------------- |
-| **`bytesWritten`** | <code>number</code>   |
-| **`bytesRead`**    | <code>number</code>   |
-| **`data`**         | <code>number[]</code> |
-
-
 #### TcpWriteAndReadOptions
 
 Request/Response helper: write bytes, then read back with a timeout and optional pattern.
@@ -372,15 +445,6 @@ Notes:
 | **`suspendStreamDuringRR`** | <code>boolean</code>            |
 
 
-#### TcpStartStopResult
-
-Result for start/stop read.
-
-| Prop          | Type                 |
-| ------------- | -------------------- |
-| **`reading`** | <code>boolean</code> |
-
-
 #### TcpStartReadOptions
 
 Options for starting continuous stream reading.
@@ -394,33 +458,6 @@ Notes:
 | **`readTimeoutMs`** | <code>number</code> |
 
 
-#### TcpIsConnectedResult
-
-Result for isConnected().
-
-| Prop            | Type                 |
-| --------------- | -------------------- |
-| **`connected`** | <code>boolean</code> |
-
-
-#### TcpDisconnectResult
-
-Result for disconnect().
-
-| Prop               | Type                 |
-| ------------------ | -------------------- |
-| **`disconnected`** | <code>boolean</code> |
-
-
-#### TcpIsReadingResult
-
-Result for isReading().
-
-| Prop          | Type                 |
-| ------------- | -------------------- |
-| **`reading`** | <code>boolean</code> |
-
-
 #### PluginListenerHandle
 
 | Prop         | Type                                      |
@@ -431,9 +468,58 @@ Result for isReading().
 ### Type Aliases
 
 
+#### TcpConnectResult
+
+Result for connect().
+
+<code><a href="#baseresult">BaseResult</a> & { connected: boolean; }</code>
+
+
+#### TcpWriteResult
+
+Result for write().
+
+<code><a href="#baseresult">BaseResult</a> & { bytesWritten: number; }</code>
+
+
 #### ArrayBufferLike
 
 <code>ArrayBufferTypes[keyof ArrayBufferTypes]</code>
+
+
+#### TcpWriteAndReadResult
+
+Result for writeAndRead().
+
+<code><a href="#baseresult">BaseResult</a> & { bytesWritten: number; bytesRead: number; data: number[]; }</code>
+
+
+#### TcpStartStopResult
+
+Result for start/stop read.
+
+<code><a href="#baseresult">BaseResult</a> & { reading: boolean; }</code>
+
+
+#### TcpIsConnectedResult
+
+Result for isConnected().
+
+<code><a href="#baseresult">BaseResult</a> & { connected: boolean; }</code>
+
+
+#### TcpDisconnectResult
+
+Result for disconnect().
+
+<code><a href="#baseresult">BaseResult</a> & { disconnected: boolean; }</code>
+
+
+#### TcpIsReadingResult
+
+Result for isReading().
+
+<code><a href="#baseresult">BaseResult</a> & { reading: boolean; }</code>
 
 
 #### TcpDataEvent
