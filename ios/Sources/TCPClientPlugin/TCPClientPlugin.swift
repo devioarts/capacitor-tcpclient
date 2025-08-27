@@ -53,7 +53,15 @@ public class TCPClientPlugin: CAPPlugin, CAPBridgedPlugin, TcpClientDelegate {
         /// Resolves with { error, errorMessage, connected }.
         @objc func tcpConnect(_ call: CAPPluginCall) {
             guard let host = call.getString("host") else { call.reject("host is required"); return }
-            let port = UInt16(call.getInt("port") ?? 9100)
+
+            let portInt = call.getInt("port") ?? 9100
+            guard (1...65535).contains(portInt) else {
+                call.resolve(["error": true, "errorMessage": "invalid port", "connected": false])
+                return
+            }
+            let port = UInt16(portInt)
+
+
             let timeoutMs = call.getInt("timeoutMs") ?? 3000
             let noDelay = call.getBool("noDelay") ?? true
             let keepAlive = call.getBool("keepAlive") ?? true
@@ -132,11 +140,11 @@ public class TCPClientPlugin: CAPPlugin, CAPBridgedPlugin, TcpClientDelegate {
         /// - `maxBytes`: max response size to collect
         /// - `expect`: optional hex string or number[]; if present, we keep reading until it appears or maxBytes/timeout
         /// - `suspendStreamDuringRR`: if true and streaming is active, suspend it to avoid consuming the response
-        /// On success resolves with { error:false, bytesWritten, bytesReaded, data:number[] }.
+        /// On success resolves with { error:false, bytesWritten, bytesRead, data:number[] }.
         /// On timeout resolves error:true but `bytesWritten` may still reflect the request length.
         @objc func tcpWriteAndRead(_ call: CAPPluginCall) {
             guard let arr = call.getArray("data", Int.self) else {
-                call.resolve(["error": true, "errorMessage": "data is required (number[])", "bytesWritten": 0, "bytesReaded": 0, "data": []]); return
+                call.resolve(["error": true, "errorMessage": "data is required (number[])", "bytesWritten": 0, "bytesRead": 0, "data": []]); return
             }
             let bytes = arr.map { UInt8(truncatingIfNeeded: $0) }
             let timeout = call.getInt("timeoutMs") ?? 1000
@@ -148,11 +156,8 @@ public class TCPClientPlugin: CAPPlugin, CAPBridgedPlugin, TcpClientDelegate {
 
             // Optional pattern matcher: "expect" can be hex string or number[]
             var matcher: ((Data) -> Bool)? = nil
-            if let hex = call.getString("expect") {
-                let clean = hex.replacingOccurrences(of: " ", with: "").lowercased()
-                if let pat = Data(clean) {
-                    matcher = { buf in buf.range(of: pat) != nil }
-                }
+            if let hex = call.getString("expect"), let pat = Data(hexString: hex) {
+                matcher = { buf in buf.range(of: pat) != nil }
             } else if let arrPat = call.getArray("expect", Int.self) {
                 let pat = Data(arrPat.map { UInt8(truncatingIfNeeded: $0) })
                 matcher = { buf in buf.range(of: pat) != nil }
@@ -167,7 +172,7 @@ public class TCPClientPlugin: CAPPlugin, CAPBridgedPlugin, TcpClientDelegate {
                         "error": false,
                         "errorMessage": NSNull(),
                         "bytesWritten": bytes.count,
-                        "bytesReaded": data.count,
+                        "bytesRead": data.count,
                         "data": [UInt8](data)
                     ])
                 case .failure(let e):
@@ -178,7 +183,7 @@ public class TCPClientPlugin: CAPPlugin, CAPBridgedPlugin, TcpClientDelegate {
                         "error": true,
                         "errorMessage": "writeAndRead failed: \(e.localizedDescription)",
                         "bytesWritten": isTimeout ? bytes.count : 0,
-                        "bytesReaded": 0,
+                        "bytesRead": 0,
                         "data": []
                     ])
                 }
@@ -223,22 +228,31 @@ public class TCPClientPlugin: CAPPlugin, CAPBridgedPlugin, TcpClientDelegate {
         }
 }
 
-// Helper: hex -> Data
+// Helper: Hex → Data (tolerant to whitespace and 0x prefixes, case-insensitive)
 private extension Data {
-    /// Initialize Data from a hex string (e.g. "1b40" or "1B 40").
-    /// Returns nil if the string contains invalid hex or has odd length.
-    init?(_ hexString: String) {
-        self.init()
-        let s = hexString
-        if s.count % 2 != 0 { return nil }
-        var idx = s.startIndex
-        while idx < s.endIndex {
-            let next = s.index(idx, offsetBy: 2)
-            let byteStr = s[idx..<next]
+    /// Creates Data from a hex string.
+    /// Accepts: "1b40", "1B 40", "0x1b 0x40", "1B40"
+    /// Rules: ignores whitespace and optional "0x"/"0X" prefixes; requires even number of hex digits.
+    init?(hexString: String) {
+        // Strip "0x"/"0X" and all whitespace
+        let stripped = hexString
+            .replacingOccurrences(of: "0x", with: "", options: [.caseInsensitive])
+            .replacingOccurrences(of: "\\s+", with: "", options: .regularExpression)
+
+        let count = stripped.count
+        guard count > 0, count % 2 == 0 else { return nil }
+
+        self.init(capacity: count / 2)
+        var idx = stripped.startIndex
+        while idx < stripped.endIndex {
+            let next = stripped.index(idx, offsetBy: 2)
+            let byteStr = stripped[idx..<next]
             if let b = UInt8(byteStr, radix: 16) {
                 self.append(b)
                 idx = next
-            } else { return nil }
+            } else {
+                return nil
+            }
         }
     }
 }

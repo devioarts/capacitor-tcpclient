@@ -29,6 +29,11 @@ class TCPClientPlugin : Plugin(), TCPClientDelegate {
         val host = call.getString("host")
         if (host.isNullOrEmpty()) { call.resolve(JSObject().put("error", true).put("errorMessage", "host is required").put("connected", false)); return }
         val port = call.getInt("port") ?: 9100
+        if (port !in 1..65535) {
+            call.resolve(JSObject().put("error", true).put("errorMessage", "invalid port").put("connected", false))
+            return
+        }
+
         val timeoutMs = call.getInt("timeoutMs") ?: 3000
         val noDelay = call.getBoolean("noDelay") ?: true
         val keepAlive = call.getBoolean("keepAlive") ?: true
@@ -67,18 +72,25 @@ class TCPClientPlugin : Plugin(), TCPClientDelegate {
      * Expects `data` as a JS array of numbers (0..255).
      * Resolves with: { error, errorMessage, bytesWritten }
      */
-    @PluginMethod
-    fun tcpWrite(call: PluginCall) {
-        val arr = call.getArray("data")
-        if (arr == null) { call.resolve(JSObject().put("error", true).put("errorMessage", "data is required (number[])").put("bytesWritten", 0)); return }
-        val bytes = Helpers.jsArrayToBytes(arr)
-        tcpClient.write(bytes) { res ->
-            val obj = JSObject()
-            if (res.isSuccess) obj.put("error", false).put("errorMessage", null).put("bytesWritten", res.getOrNull())
-            else obj.put("error", true).put("errorMessage", "write failed: ${res.exceptionOrNull()?.message}").put("bytesWritten", 0)
-            bridge?.activity?.runOnUiThread {call.resolve(obj)}
-        }
+@PluginMethod
+fun tcpWrite(call: PluginCall) {
+    val arr = call.getArray("data")
+    if (arr == null) {
+        call.resolve(JSObject().put("error", true).put("errorMessage", "data is required (number[])").put("bytesWritten", 0))
+        return
     }
+    val bytes = Helpers.jsArrayToBytes(arr)
+    if (bytes == null) {
+        call.resolve(JSObject().put("error", true).put("errorMessage", "invalid data (expected number[])").put("bytesWritten", 0))
+        return
+    }
+    tcpClient.write(bytes) { res ->
+        val obj = JSObject()
+        if (res.isSuccess) obj.put("error", false).put("errorMessage", null).put("bytesWritten", res.getOrNull())
+        else obj.put("error", true).put("errorMessage", "write failed: ${res.exceptionOrNull()?.message}").put("bytesWritten", 0)
+        bridge?.activity?.runOnUiThread { call.resolve(obj) }
+    }
+}
 
     /**
      * Start continuous stream reading.
@@ -136,15 +148,23 @@ class TCPClientPlugin : Plugin(), TCPClientDelegate {
      *   - suspendStreamDuringRR?: boolean (pause streaming to avoid stealing the reply)
      *
      * Resolves with:
-     *   - success: { error:false, errorMessage:null, bytesWritten, bytesReaded, data:int[] }
-     *   - timeout: { error:true, errorMessage, bytesWritten: data.length, bytesReaded:0, data:[] }
-     *   - other errors: { error:true, errorMessage, bytesWritten:0, bytesReaded:0, data:[] }
+     *   - success: { error:false, errorMessage:null, bytesWritten, bytesRead, data:int[] }
+     *   - timeout: { error:true, errorMessage, bytesWritten: data.length, bytesRead:0, data:[] }
+     *   - other errors: { error:true, errorMessage, bytesWritten:0, bytesRead:0, data:[] }
      */
     @PluginMethod
     fun tcpWriteAndRead(call: PluginCall) {
         val arr = call.getArray("data")
-        if (arr == null) { call.resolve(JSObject().put("error", true).put("errorMessage", "data is required (number[])").put("bytesWritten", 0).put("bytesReaded", 0).put("data", JSArray())); return }
+        if (arr == null) { call.resolve(JSObject().put("error", true).put("errorMessage", "data is required (number[])").put("bytesWritten", 0).put("bytesRead", 0).put("data", JSArray())); return }
         val bytes = Helpers.jsArrayToBytes(arr)
+        if (bytes == null) {
+            call.resolve(JSObject().put("error", true).put("errorMessage", "invalid data (expected number[])")
+                .put("bytesWritten", 0).put("bytesRead", 0).put("data", JSArray()))
+            return
+        }
+
+
+
         val timeout = call.getInt("timeoutMs") ?: 1000
         val maxBytes = call.getInt("maxBytes") ?: 4096
 
@@ -170,7 +190,7 @@ class TCPClientPlugin : Plugin(), TCPClientDelegate {
                 obj.put("error", false)
                     .put("errorMessage", null)
                     .put("bytesWritten", bytes.size)
-                    .put("bytesReaded", data.size)
+                    .put("bytesRead", data.size)
                     .put("data", Helpers.bytesToJSArray(data))
             } else {
                 val ex = res.exceptionOrNull()
@@ -178,7 +198,7 @@ class TCPClientPlugin : Plugin(), TCPClientDelegate {
                 obj.put("error", true)
                     .put("errorMessage", "writeAndRead failed: ${ex?.message}")
                     .put("bytesWritten", if (timedOut) bytes.size else 0)
-                    .put("bytesReaded", 0)
+                    .put("bytesRead", 0)
                     .put("data", JSArray())
             }
             bridge?.activity?.runOnUiThread {call.resolve(obj)}

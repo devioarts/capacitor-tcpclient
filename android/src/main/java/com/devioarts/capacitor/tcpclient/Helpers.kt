@@ -2,8 +2,6 @@
 package com.devioarts.capacitor.tcpclient
 
 import com.getcapacitor.JSArray
-import org.json.JSONArray
-// NOTE: JSONArray import appears unused; safe to remove if not referenced elsewhere.
 
 /**
  * Helper utilities for bridging binary data between Kotlin/Android and the Capacitor JS layer.
@@ -29,13 +27,36 @@ object Helpers {
      * Failure modes:
      * - If the JSArray contains non-numeric entries, JSArray#getInt(i) may throw.
      */
-    fun jsArrayToBytes(arr: JSArray): ByteArray {
-        val out = ByteArray(arr.length())
-        for (i in 0 until arr.length()) {
-            val v = (arr.getInt(i)) and 0xFF
-            out[i] = v.toByte()
+    fun jsArrayToBytes(arr: JSArray): ByteArray? {
+        val len = arr.length()
+        val out = ByteArray(len)
+        for (i in 0 until len) {
+            try {
+                val v = arr.getInt(i) // may throw if non-numeric
+                out[i] = (v and 0xFF).toByte()
+            } catch (e: Exception) {
+                return null
+            }
         }
         return out
+    }
+
+    /**
+     * Lenient conversion: skips non-numeric entries instead of failing.
+     * - Useful if you prefer best-effort writes.
+     * - Keeps original order of valid items.
+     */
+    fun jsArrayToBytesLenient(arr: JSArray): ByteArray {
+        val tmp = ArrayList<Byte>(arr.length())
+        for (i in 0 until arr.length()) {
+            try {
+                val v = arr.getInt(i)
+                tmp.add((v and 0xFF).toByte())
+            } catch (_: Exception) {
+                // skip invalid entry
+            }
+        }
+        return tmp.toByteArray()
     }
 
     /**
@@ -46,7 +67,6 @@ object Helpers {
      * - This is friendlier to WebView/bridge than a JSONArray of boxed Integers, especially for large buffers.
      */
     fun bytesToJSArray(bytes: ByteArray): JSArray {
-        // <- klíčová změna: použít PRIMITIVNÍ pole int[]
         val ints = IntArray(bytes.size) { i -> (bytes[i].toInt() and 0xFF) }
         return JSArray(ints)
     }
@@ -77,25 +97,42 @@ object Helpers {
     }
 
     /**
-     * Naive byte-pattern search: find the first occurrence of [needle] in [haystack].
-     *
-     * Complexity:
-     * - O(n*m) worst case (n = haystack size, m = needle size)
-     *
-     * Suitability:
-     * - Adequate for small to medium buffers or one-off checks.
-     * - For very large streams or frequent searches, consider a more efficient algorithm (e.g., KMP/Boyer–Moore).
+     * Find the first occurrence of [needle] inside [haystack] using
+     * the Boyer–Moore–Horspool algorithm.
      *
      * Returns:
-     * - Start index of the first match, or -1 if not found.
+     *  - start index of the first match
+     *  - -1 if no match is found
+     *
+     * Complexity:
+     *  - Average ~O(n / m) where n=haystack length, m=needle length
+     *  - Worst-case O(n*m) is rare for random data
+     *
+     * Notes:
+     *  - For an empty needle this mirrors previous behavior and returns -1.
+     *  - This implementation uses a 256-entry skip table for byte values.
      */
     fun indexOf(haystack: ByteArray, needle: ByteArray): Int {
-        if (needle.isEmpty() || needle.size > haystack.size) return -1
-        outer@ for (i in 0..haystack.size - needle.size) {
-            for (j in needle.indices) {
-                if (haystack[i + j] != needle[j]) continue@outer
-            }
-            return i
+        val n = haystack.size
+        val m = needle.size
+        if (m == 0 || m > n) return -1
+
+        // Build bad-character skip table for all 256 possible byte values.
+        // Default shift is the needle length; last character keeps default.
+        val skip = IntArray(256) { m }
+        for (i in 0 until m - 1) {
+            skip[needle[i].toInt() and 0xFF] = m - 1 - i
+        }
+
+        var i = 0
+        while (i <= n - m) {
+            var j = m - 1
+            // Compare from the end of the pattern backwards.
+            while (j >= 0 && haystack[i + j] == needle[j]) j--
+            if (j < 0) return i // full match
+
+            // Advance by the skip value based on the mismatching byte in haystack
+            i += skip[haystack[i + m - 1].toInt() and 0xFF]
         }
         return -1
     }

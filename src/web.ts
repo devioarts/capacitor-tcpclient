@@ -16,6 +16,8 @@ import type {
   TcpIsConnectedResult,
   TcpDisconnectResult,
   TcpIsReadingResult} from './definitions';
+import { parseExpectBytes  } from './utils/expect';
+import type {ExpectInput} from './utils/expect';
 
 /**
  * Shape of the remove handle returned by addListener in the Electron preload API.
@@ -23,7 +25,7 @@ import type {
 type Remove = { remove: () => void };
 
 /** Supported 'expect' value types for RR helper (hex string or byte array). */
-type ExpectType = string | number[] | undefined;
+type ExpectType = ExpectInput;
 
 /**
  * Contract the Electron preload exposes as `window.TCPClient`.
@@ -127,25 +129,6 @@ function mockStopRead() {
 }
 function log(...a: any[]) { if (!isElectron) console.debug('[LANComm mock]', ...a); }
 
-/**
- * Parse an 'expect' value from RR into bytes. Accepts:
- * - number[] (verbatim)
- * - hex string (whitespace and 0x prefixes tolerated)
- * Returns null on invalid input.
- */
-function parseExpect(expect: ExpectType): Uint8Array | null {
-  if (!expect) return null;
-  if (Array.isArray(expect)) return new Uint8Array(expect.map(n => n & 0xff));
-  const clean = String(expect).replace(/0x/gi, '').replace(/\s+/g, '').toLowerCase();
-  if (!clean || clean.length % 2) return null;
-  const out = new Uint8Array(clean.length / 2);
-  for (let i = 0; i < clean.length; i += 2) {
-    const v = parseInt(clean.slice(i, i + 2), 16);
-    if (Number.isNaN(v)) return null;
-    out[i / 2] = v & 0xff;
-  }
-  return out;
-}
 
 /** Concatenate two byte arrays (number[]) efficiently using Uint8Array under the hood. */
 function concatBytes(a: number[], b: number[]): number[] {
@@ -281,11 +264,11 @@ export class TCPClientWeb extends WebPlugin implements TCPClientPlugin {
     // ----- Mock -----
     log('tcpWriteAndRead', args);
     if (!mock.connected) {
-      return fail('not connected (mock)', { bytesWritten: 0, bytesReaded: 0, data: [] as number[] });
+      return fail('not connected (mock)', { bytesWritten: 0, bytesRead: 0, data: [] as number[] });
     }
 
     mock.lastWrite = data.slice() as number[];
-    const expectBuf = parseExpect(args.expect as ExpectType);
+    const expectBuf = parseExpectBytes(args.expect as ExpectType);
     let reply = mockResponseFor(data);
     if (expectBuf) reply = concatBytes(reply, Array.from(expectBuf));
 
@@ -295,7 +278,7 @@ export class TCPClientWeb extends WebPlugin implements TCPClientPlugin {
     await sleep(Math.min(150, args.timeoutMs ?? 1000));
     return ok({
       bytesWritten: data.length,
-      bytesReaded: reply.length,
+      bytesRead: reply.length,
       data: reply,
     });
   }

@@ -17,10 +17,11 @@ declare global {
    *
    * Tip: Extra fields for each call are carried via a generic type parameter.
    */
-  interface TCPStd<T = Record<string, unknown>> {
-    error: boolean;
-    errorMessage: string | null;
-  }
+
+  type TCPStd<T extends object = Record<string, unknown>> =
+    { error: boolean; errorMessage: string | null } & T;
+
+
 
   /**
    * Preload-injected API surface.
@@ -75,7 +76,7 @@ declare global {
       /**
        * Request/Response helper: write bytes and collect a reply with optional early-exit pattern.
        * - `expect` accepts a hex string or number[].
-       * - On timeout, bytesWritten may still be non-null while bytesReaded is null.
+       * - On timeout, bytesWritten may still be non-null while bytesRead is null.
        */
       tcpWriteAndRead(args: {
         data: number[];
@@ -83,7 +84,7 @@ declare global {
         maxBytes?: number;
         expect?: string | number[];
         suspendStreamDuringRR?: boolean;
-      }): Promise<TCPStd<{ data: number[]; bytesWritten: number | null; bytesReaded: number | null }>>;
+      }): Promise<TCPStd<{ data: number[]; bytesWritten: number | null; bytesRead: number | null }>>;
 
       /**
        * Subscribe to native events forwarded from the main process:

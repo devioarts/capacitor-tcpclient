@@ -1,9 +1,13 @@
 // electron/main/tcpclient.ts
+import type {ExpectInput} from '../src/utils/expect'
+
 import type { BrowserWindow } from 'electron';
 import { ipcMain } from 'electron';
 import net from 'net';
+import { parseExpectBytes } from '../src/utils/expect';
 
-type ExpectType = string | number[] | undefined;
+
+type ExpectType = ExpectInput;
 
 type Empty = Record<string, never>;
 type StdOk<T extends object = Empty>  = { error: false; errorMessage: null } & T;
@@ -65,26 +69,7 @@ export class TCPClient {
   private jsArrToBuf(arr: number[]) {
     return Buffer.from(arr.map(n => n & 0xff));
   }
-  /**
-   * Parse 'expect' (hex string like "1b40" or number[]) into a Buffer.
-   * Returns null for invalid input; tolerant to whitespace/0x prefixes.
-   */
-  private parseExpect(expect: ExpectType): Buffer | null {
-    if (!expect) return null;
-    if (typeof expect === 'string') {
-      const clean = expect.replace(/0x/gi, '').replace(/\s+/g, '').toLowerCase();
-      if (!clean || clean.length % 2) return null;
-      const out = Buffer.alloc(clean.length / 2);
-      for (let i = 0; i < clean.length; i += 2) {
-        const v = parseInt(clean.slice(i, i + 2), 16);
-        if (Number.isNaN(v)) return null;
-        out[i / 2] = v & 0xff;
-      }
-      return out;
-    }
-    if (Array.isArray(expect)) return this.jsArrToBuf(expect);
-    return null;
-  }
+
   /** Convenience notifiers for disconnect reasons (forwarded to renderer). */
   private notifyDisconnectManual() { this.sendEvent('tcpDisconnect', { reason: 'manual', disconnected: true }); }
   private notifyDisconnectRemote() { this.sendEvent('tcpDisconnect', { reason: 'remote', disconnected: true }); }
@@ -262,18 +247,19 @@ export class TCPClient {
     maxBytes?: number;
     expect?: ExpectType;
     suspendStreamDuringRR?: boolean;
-  }): Promise<Std<{ data: number[]; bytesWritten: number | null; bytesReaded: number | null }>> {
+  }): Promise<Std<{ data: number[]; bytesWritten: number | null; bytesRead: number | null }>> {
     if (!this.isOpen() || !this.sock) {
-      return fail('not connected', { data: [], bytesWritten: null, bytesReaded: null });
+      return fail('not connected', { data: [], bytesWritten: null, bytesRead: null });
     }
     if (this.rrInFlight) {
-      return fail('busy', { data: [], bytesWritten: null, bytesReaded: null });
+      return fail('busy', { data: [], bytesWritten: null, bytesRead: null });
     }
     this.rrInFlight = true;
 
     const timeout = Math.max(1, args.timeoutMs ?? this.readTimeoutMs ?? 1000);
     const cap = Math.max(1, args.maxBytes ?? 4096);
-    const expectBuf = this.parseExpect(args.expect);
+    const expectUA = parseExpectBytes(args.expect);
+    const expectBuf = expectUA ? Buffer.from(expectUA) : null;
 
     const s = this.sock!;
     const wasReading = this.reading;
@@ -287,7 +273,7 @@ export class TCPClient {
     const reqBuf = this.jsArrToBuf(args.data || []);
     const bytesWritten = reqBuf.length;
 
-    return new Promise<Std<{ data: number[]; bytesWritten: number | null; bytesReaded: number | null }>>((resolve) => {
+    return new Promise<Std<{ data: number[]; bytesWritten: number | null; bytesRead: number | null }>>((resolve) => {
       let timer: NodeJS.Timeout | null = null;
       const chunks: Buffer[] = [];
 
@@ -303,10 +289,10 @@ export class TCPClient {
         this.rrInFlight = false;
 
         if (err) {
-          resolve(fail(err, { data: [], bytesWritten, bytesReaded: null }));
+          resolve(fail(err, { data: [], bytesWritten, bytesRead: null }));
         } else {
           const resBuf = (out ?? Buffer.alloc(0)).subarray(0, cap);
-          resolve(ok({ data: Array.from(resBuf.values()), bytesWritten, bytesReaded: resBuf.length }));
+          resolve(ok({ data: Array.from(resBuf.values()), bytesWritten, bytesRead: resBuf.length }));
         }
       };
 

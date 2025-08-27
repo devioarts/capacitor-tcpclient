@@ -129,7 +129,7 @@ module.exports.createTCPClientAPI = ({ ipcRenderer }) => {
      *  - maxBytes?:number
      *  - expect?:number[]|hex-string
      *  - suspendStreamDuringRR?:boolean
-     * Returns standardized shape with { data:number[], bytesWritten, bytesReaded }.
+     * Returns standardized shape with { data:number[], bytesWritten, bytesRead }.
      */
     async tcpWriteAndRead(args) {
       try {
@@ -137,10 +137,10 @@ module.exports.createTCPClientAPI = ({ ipcRenderer }) => {
         if (hasStdShape(res)) return res;
         const data = res?.data || [];
         const bytesWritten = typeof res?.bytesWritten === 'number' ? res.bytesWritten : null;
-        const bytesReaded  = typeof res?.bytesReaded  === 'number' ? res.bytesReaded  : data.length;
-        return ok({ data, bytesWritten, bytesReaded });
+        const bytesRead  = typeof res?.bytesRead  === 'number' ? res.bytesRead  : data.length;
+        return ok({ data, bytesWritten, bytesRead });
       } catch (e) {
-        return fail(e, { data: [], bytesWritten: null, bytesReaded: null });
+        return fail(e, { data: [], bytesWritten: null, bytesRead: null });
       }
     },
 

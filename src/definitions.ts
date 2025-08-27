@@ -74,7 +74,7 @@ export interface TcpWriteResult extends BaseResult {
 /** Result for writeAndRead(). */
 export interface TcpWriteAndReadResult extends BaseResult {
   bytesWritten: number;
-  bytesReaded: number;
+  bytesRead: number;
   data: number[];
 }
 

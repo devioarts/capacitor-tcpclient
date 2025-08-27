@@ -349,7 +349,7 @@ Result for writeAndRead().
 | Prop               | Type                  |
 | ------------------ | --------------------- |
 | **`bytesWritten`** | <code>number</code>   |
-| **`bytesReaded`**  | <code>number</code>   |
+| **`bytesRead`**    | <code>number</code>   |
 | **`data`**         | <code>number[]</code> |
 
 
