@@ -1,0 +1,342 @@
+// electron/main/tcpclient.ts
+import type { BrowserWindow } from 'electron';
+import { ipcMain } from 'electron';
+import net from 'net';
+
+type ExpectType = string | number[] | undefined;
+
+type Empty = Record<string, never>;
+type StdOk<T extends object = Empty>  = { error: false; errorMessage: null } & T;
+type StdErr<T extends object = Empty> = { error: true;  errorMessage: string } & T;
+type Std<T extends object = Empty>    = StdOk<T> | StdErr<T>;
+
+// Standardized ok/fail helpers with overloads (preserve precise typings without `{}` widening).
+function ok(): StdOk<Empty>;
+function ok<T extends object>(extra: T): StdOk<T>;
+function ok<T extends object>(extra?: T) {
+  return { error: false, errorMessage: null, ...(extra ?? ({} as Empty)) };
+}
+function fail(msg: unknown): StdErr<Empty>;
+function fail<T extends object>(msg: unknown, extra: T): StdErr<T>;
+function fail<T extends object>(msg: unknown, extra?: T) {
+  const m =
+    (msg as any)?.message ??
+    (typeof msg === 'string' ? msg : null) ??
+    String(msg ?? 'Error');
+  return { error: true, errorMessage: m, ...(extra ?? ({} as Empty)) };
+}
+
+export class TCPClient {
+  private win: BrowserWindow;
+  private sock: net.Socket | null = null;         // active socket, if any
+  private reading = false;                         // stream-reading state for renderer parity
+  private rrInFlight = false;                      // exclude concurrent request/response cycles
+  private streamDataHandler?: (chunk: Buffer) => void; // current 'data' listener used for streaming
+  private onClose?: (hadErr: boolean) => void;     // 'close' handler reference (to unregister on manual disconnect)
+
+  private lastChunkSize = 4096;                    // remembers requested chunk size to partition large frames
+  private readTimeoutMs = 1000;                    // logical RR timeout (Node sockets are evented; we emulate via timer)
+
+  constructor(win: BrowserWindow) {
+    this.win = win;
+
+    // Register IPC handlers (main process). The preload/renderer will invoke these via ipcRenderer.invoke.
+    ipcMain.handle('tcpclient:tcpConnect',        (_e, args) => this.tcpConnect(args));
+    ipcMain.handle('tcpclient:tcpDisconnect',     () => this.tcpDisconnect());
+    ipcMain.handle('tcpclient:tcpIsConnected',    () => this.tcpIsConnected());
+    ipcMain.handle('tcpclient:tcpIsReading',      () => this.tcpIsReading());
+    ipcMain.handle('tcpclient:tcpWrite',          (_e, args) => this.tcpWrite(args));
+    ipcMain.handle('tcpclient:tcpStartRead',      (_e, args) => this.tcpStartRead(args));
+    ipcMain.handle('tcpclient:tcpStopRead',       () => this.tcpStopRead());
+    ipcMain.handle('tcpclient:tcpSetReadTimeout', (_e, args) => this.tcpSetReadTimeout(args));
+    ipcMain.handle('tcpclient:tcpWriteAndRead',   (_e, args) => this.tcpWriteAndRead(args));
+  }
+
+  /** Emit an event to the renderer with a stable name prefix. */
+  private sendEvent(name: 'tcpData' | 'tcpDisconnect', payload: any) {
+    this.win.webContents.send(`tcpclient:event:${name}`, payload);
+  }
+  /** Cheap connection health: socket exists, not destroyed, not still connecting. */
+  private isOpen() {
+    const s = this.sock;
+    return !!s && !s.destroyed && !s.connecting;
+  }
+  /** Convert JS number[] (0..255) to a Buffer safely. */
+  private jsArrToBuf(arr: number[]) {
+    return Buffer.from(arr.map(n => n & 0xff));
+  }
+  /**
+   * Parse 'expect' (hex string like "1b40" or number[]) into a Buffer.
+   * Returns null for invalid input; tolerant to whitespace/0x prefixes.
+   */
+  private parseExpect(expect: ExpectType): Buffer | null {
+    if (!expect) return null;
+    if (typeof expect === 'string') {
+      const clean = expect.replace(/0x/gi, '').replace(/\s+/g, '').toLowerCase();
+      if (!clean || clean.length % 2) return null;
+      const out = Buffer.alloc(clean.length / 2);
+      for (let i = 0; i < clean.length; i += 2) {
+        const v = parseInt(clean.slice(i, i + 2), 16);
+        if (Number.isNaN(v)) return null;
+        out[i / 2] = v & 0xff;
+      }
+      return out;
+    }
+    if (Array.isArray(expect)) return this.jsArrToBuf(expect);
+    return null;
+  }
+  /** Convenience notifiers for disconnect reasons (forwarded to renderer). */
+  private notifyDisconnectManual() { this.sendEvent('tcpDisconnect', { reason: 'manual', disconnected: true }); }
+  private notifyDisconnectRemote() { this.sendEvent('tcpDisconnect', { reason: 'remote', disconnected: true }); }
+  private notifyDisconnectError(err: string) {
+    this.sendEvent('tcpDisconnect', { reason: 'error', error: err, disconnected: true });
+  }
+
+  /**
+   * Connect to a TCP host.
+   * - Ensures a clean starting state (calls tcpDisconnect()).
+   * - Applies TCP_NODELAY and keep-alive settings.
+   * - Sets up a connection timeout via setTimeout; clears listeners accordingly.
+   * Resolves with a standardized result shape.
+   */
+  async tcpConnect(args: {
+    host: string; port?: number; timeoutMs?: number; noDelay?: boolean; keepAlive?: boolean;
+  }): Promise<Std<{ connected: boolean }>> {
+    const host = args.host;
+    const port = args.port ?? 9100;
+    const timeoutMs = args.timeoutMs ?? 3000;
+    const noDelay = args.noDelay ?? true;
+    const keepAlive = args.keepAlive ?? true;
+
+    // ensure clean state (neemituje "manual", pokud žádný socket nebyl)
+    await this.tcpDisconnect();
+
+    return new Promise<Std<{ connected: boolean }>>((resolve) => {
+      try {
+        const s = new net.Socket();
+        this.sock = s;
+
+        // Connection watchdog: if not connected in time, destroy and fail.
+        let connectTimer: NodeJS.Timeout | null = setTimeout(() => {
+          connectTimer = null;
+          try { s.destroy(new Error('connect timeout')); } catch { /* ignore */ }
+          if (this.sock === s) this.sock = null;
+          resolve(fail('connect timeout', { connected: false }));
+        }, Math.max(1, timeoutMs));
+
+        s.setNoDelay(!!noDelay);
+        s.setKeepAlive(!!keepAlive, 60_000);
+
+        const onError = (err: Error) => {
+          if (connectTimer) { clearTimeout(connectTimer); connectTimer = null; }
+          if (this.sock === s) this.sock = null;
+          resolve(fail(`connect failed: ${err.message}`, { connected: false }));
+        };
+        // Guard the connect phase with a one-shot error listener.
+        s.once('error', onError);
+
+        s.connect({ host, port }, () => {
+          if (connectTimer) { clearTimeout(connectTimer); connectTimer = null; }
+          s.removeListener('error', onError);
+
+          // Register a one-shot close handler and keep a reference to avoid duplicate events on manual destroy().
+          this.onClose = (hadErr: boolean) => {
+            if (this.sock === s) this.sock = null;
+            if (hadErr) this.notifyDisconnectError('socket closed with error');
+            else this.notifyDisconnectRemote();
+          };
+          s.once('close', this.onClose);
+
+          resolve(ok({ connected: true }));
+        });
+      } catch (e) {
+        this.sock = null;
+        resolve(fail(e, { connected: false }));
+      }
+    });
+  }
+
+  /**
+   * Manual disconnect.
+   * - Stops streaming (removes 'data' handler) and resets reading=false.
+   * - Unregisters the 'close' handler before destroy() to avoid duplicate disconnect events.
+   * - Notifies the renderer with a 'manual' disconnect event.
+   */
+  async tcpDisconnect(): Promise<Std<{ disconnected: boolean; reading?: boolean }>> {
+    await this.tcpStopRead(); // sets this.reading = false
+
+    const s = this.sock;
+    this.sock = null;
+
+    if (s) {
+      // Unhook the close listener before destroy so we don't emit a second event.
+      if (this.onClose) { s.off('close', this.onClose); this.onClose = undefined; }
+      try { s.destroy(); } catch { /* ignore */ }
+      this.notifyDisconnectManual();
+    }
+
+    return ok({ disconnected: true, reading: false });
+  }
+
+  /** Quick connection status (main process side). */
+  async tcpIsConnected(): Promise<Std<{ connected: boolean }>> {
+    return ok({ connected: this.isOpen() });
+  }
+
+  /** Whether stream reading is currently enabled from the renderer's perspective. */
+  async tcpIsReading(): Promise<Std<{ reading: boolean }>> {
+    return ok({ reading: this.reading });
+  }
+
+  /**
+   * Write raw bytes to the socket.
+   * - Fails if no connection or an RR cycle is active.
+   * - Uses Node's write callback to resolve success/failure.
+   */
+  async tcpWrite(args: { data: number[] }): Promise<Std<{ bytesWritten: number }>> {
+    if (!this.isOpen() || !this.sock) return fail('not connected', { bytesWritten: 0 });
+    if (this.rrInFlight) return fail('busy', { bytesWritten: 0 });
+
+    const buf = this.jsArrToBuf(args.data || []);
+    return new Promise<Std<{ bytesWritten: number }>>((resolve) => {
+      this.sock!.write(buf, (err) => {
+        if (err) resolve(fail(`write failed: ${err.message}`, { bytesWritten: 0 }));
+        else resolve(ok({ bytesWritten: buf.length }));
+      });
+    });
+  }
+
+  /**
+   * Start streaming read.
+   * - Attaches a 'data' handler that slices large frames into `lastChunkSize` parts,
+   *   emitting multiple tcpData events to the renderer.
+   * - Idempotent: if already reading, returns reading:true without changing handlers.
+   */
+  async tcpStartRead(args: { chunkSize?: number; readTimeoutMs?: number }): Promise<Std<{ reading: boolean }>> {
+    if (!this.isOpen() || !this.sock) return ok({ reading: false });
+    if (this.reading) return ok({ reading: true });
+    this.reading = true;
+    this.lastChunkSize = Math.max(1, args?.chunkSize ?? 4096);
+    if (args?.readTimeoutMs != null) this.readTimeoutMs = Math.max(1, args.readTimeoutMs);
+
+    // Respect lastChunkSize: split larger buffers into smaller event-sized pieces.
+    this.streamDataHandler = (chunk: Buffer) => {
+      const lim = this.lastChunkSize;
+      for (let off = 0; off < chunk.length; off += lim) {
+        const part = chunk.subarray(off, Math.min(off + lim, chunk.length));
+        this.sendEvent('tcpData', { data: Array.from(part.values()) });
+      }
+    };
+    this.sock.on('data', this.streamDataHandler);
+    return ok({ reading: true });
+  }
+
+  /** Stop streaming read and remove the current 'data' handler (if any). */
+  async tcpStopRead(): Promise<Std<{ reading: boolean }>> {
+    if (this.sock && this.streamDataHandler) {
+      this.sock.off('data', this.streamDataHandler);
+    }
+    this.streamDataHandler = undefined;
+    this.reading = false;
+    return ok({ reading: false });
+  }
+
+  /** Store a logical read timeout used by the RR helper. */
+  async tcpSetReadTimeout(args: { ms: number }): Promise<Std> {
+    this.readTimeoutMs = Math.max(1, args?.ms ?? 1000);
+    return ok();
+  }
+
+  /**
+   * Request/Response helper:
+   * - Optionally suspends streaming to avoid the stream consumer stealing the response.
+   * - Accumulates chunks until:
+   *   a) `expect` pattern appears, or
+   *   b) `maxBytes` reached, or
+   *   c) timeout fires.
+   * - Ensures cleanup of listeners and internal flags in all paths.
+   */
+  async tcpWriteAndRead(args: {
+    data: number[];
+    timeoutMs?: number;
+    maxBytes?: number;
+    expect?: ExpectType;
+    suspendStreamDuringRR?: boolean;
+  }): Promise<Std<{ data: number[]; bytesWritten: number | null; bytesReaded: number | null }>> {
+    if (!this.isOpen() || !this.sock) {
+      return fail('not connected', { data: [], bytesWritten: null, bytesReaded: null });
+    }
+    if (this.rrInFlight) {
+      return fail('busy', { data: [], bytesWritten: null, bytesReaded: null });
+    }
+    this.rrInFlight = true;
+
+    const timeout = Math.max(1, args.timeoutMs ?? this.readTimeoutMs ?? 1000);
+    const cap = Math.max(1, args.maxBytes ?? 4096);
+    const expectBuf = this.parseExpect(args.expect);
+
+    const s = this.sock!;
+    const wasReading = this.reading;
+    const shouldSuspend = !!(args.suspendStreamDuringRR ?? true) && wasReading;
+
+    // Temporarily unhook streaming so the RR listener exclusively consumes data.
+    if (shouldSuspend && this.streamDataHandler) {
+      s.off('data', this.streamDataHandler);
+    }
+
+    const reqBuf = this.jsArrToBuf(args.data || []);
+    const bytesWritten = reqBuf.length;
+
+    return new Promise<Std<{ data: number[]; bytesWritten: number | null; bytesReaded: number | null }>>((resolve) => {
+      let timer: NodeJS.Timeout | null = null;
+      const chunks: Buffer[] = [];
+
+      const finish = (out: Buffer | null, err?: string) => {
+        if (timer) { clearTimeout(timer); timer = null; }
+        s.off('data', onData);
+        s.off('error', onError);
+        s.off('close', onClose);
+        // Restore streaming if we suspended it.
+        if (shouldSuspend && this.streamDataHandler) {
+          s.on('data', this.streamDataHandler);
+        }
+        this.rrInFlight = false;
+
+        if (err) {
+          resolve(fail(err, { data: [], bytesWritten, bytesReaded: null }));
+        } else {
+          const resBuf = (out ?? Buffer.alloc(0)).subarray(0, cap);
+          resolve(ok({ data: Array.from(resBuf.values()), bytesWritten, bytesReaded: resBuf.length }));
+        }
+      };
+
+      // Accumulate data; if 'expect' is set, search for it; otherwise return first chunk.
+      const onData = (chunk: Buffer) => {
+        chunks.push(chunk);
+        const current = Buffer.concat(chunks);
+        if (expectBuf) {
+          if (current.indexOf(expectBuf) >= 0 || current.length >= cap) {
+            finish(current);
+          }
+        } else {
+          finish(current);
+        }
+      };
+
+      const onError = (err: Error) => finish(null, `writeAndRead failed: ${err.message}`);
+      const onClose = () => finish(null, 'connection closed');
+
+      // Emulate read timeout with a single-shot timer.
+      timer = setTimeout(() => finish(null, 'connect timeout'), timeout);
+
+      s.on('data', onData);
+      s.once('error', onError);
+      s.once('close', onClose);
+
+      // Fire the request; if write fails, bail out and clean up.
+      s.write(reqBuf, (err) => {
+        if (err) finish(null, `write failed: ${err.message}`);
+      });
+    });
+  }
+}
