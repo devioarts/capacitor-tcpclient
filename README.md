@@ -1,6 +1,6 @@
 # @devioarts/capacitor-tcpclient
 
-TCP Client for CapacitorJS [Example App]()
+TCP Client for CapacitorJS with iOS/Android/Electron support - [Example App](https://github.com/devioarts/capacitor-examples/tree/main/capacitor-tcpclient)
 
 ## Install
 
