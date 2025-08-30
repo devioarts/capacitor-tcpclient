@@ -1,6 +1,6 @@
 {
   "name": "@devioarts/capacitor-tcpclient",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "TCP Client for CapacitorJS working on Android, iOS and Electron",
   "main": "dist/plugin.cjs.js",
   "module": "dist/esm/index.js",
@@ -10,6 +10,7 @@
     "android/src/main/",
     "android/build.gradle",
     "dist/",
+    "electron/",
     "ios/Sources",
     "ios/Tests",
     "Package.swift",
@@ -44,7 +45,8 @@
     "build": "npm run clean && npm run docgen && tsc && rollup -c rollup.config.mjs",
     "clean": "rimraf ./dist",
     "watch": "tsc --watch",
-    "prepublishOnly": "npm run build"
+    "prepublishOnly": "npm run build",
+    "publish": "npm publish --access public"
   },
   "devDependencies": {
     "@capacitor/android": "^7.0.0",

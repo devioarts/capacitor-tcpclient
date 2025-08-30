@@ -40,6 +40,10 @@ interface TCPClientDelegate {
  * - Socket read timeout (soTimeout) is adjusted temporarily during RR and restored afterwards.
  * - When RR is active and streaming is requested to suspend, the reader job is cancelled and resumed later.
  */
+/**
+ * Core TCP client implementation used by the Capacitor plugin.
+ * Provides connection management, streaming read, and request/response APIs.
+ */
 class TCPClient {
     /** Why the connection ended. */
     sealed class DisconnectReason {

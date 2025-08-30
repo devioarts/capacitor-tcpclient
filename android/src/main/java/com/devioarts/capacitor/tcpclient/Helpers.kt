@@ -1,4 +1,7 @@
-// Helpers.kt
+/**
+ * Helpers.kt
+ * Small utility functions used by the Android side of the Capacitor TCP client plugin.
+ */
 package com.devioarts.capacitor.tcpclient
 
 import com.getcapacitor.JSArray

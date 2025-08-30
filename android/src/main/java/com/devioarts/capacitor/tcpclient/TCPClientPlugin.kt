@@ -5,6 +5,14 @@ import com.getcapacitor.annotation.CapacitorPlugin
 import com.getcapacitor.PluginMethod
 
 
+/**
+ * Capacitor plugin entry for Android.
+ * Exposes TCP client operations to JS and forwards native events.
+ *
+ * Events emitted to JS:
+ * - "tcpData": payload { data: number[] }
+ * - "tcpDisconnect": payload { disconnected:true, reading:false, reason:"manual"|"remote"|"error", error?:string }
+ */
 @CapacitorPlugin(name = "TCPClient")
 class TCPClientPlugin : Plugin(), TCPClientDelegate {
 
@@ -25,7 +33,7 @@ class TCPClientPlugin : Plugin(), TCPClientDelegate {
      * - Result is resolved on UI thread for bridge stability across OEM WebViews.
      */
     @PluginMethod
-    fun connect(call: PluginCall) {
+    fun connect(call: PluginCall) { // host: string, port?: number, timeoutMs?: number, noDelay?: boolean, keepAlive?: boolean
         val host = call.getString("host")
         if (host.isNullOrEmpty()) { call.resolve(JSObject().put("error", true).put("errorMessage", "host is required").put("connected", false)); return }
         val port = call.getInt("port") ?: 9100
