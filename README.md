@@ -1,6 +1,6 @@
 # @devioarts/capacitor-tcpclient
 
-TCP Client for CapacitorJS
+TCP Client for CapacitorJS [Example App]()
 
 ## Install
 
@@ -12,14 +12,12 @@ npx cap sync
 ## Android
 #### /android/app/src/main/AndroidManifest.xml
 ```xml
-    <uses-permission android:name="android.permission.INTERNET" />
-    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
-    <!-- Android 12+ -->
-    <uses-permission android:name="android.permission.NEARBY_WIFI_DEVICES" />
-    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
-    <application
-            android:usesCleartextTraffic="true">
-    </application>
+<uses-permission android:name="android.permission.INTERNET" />
+<uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+<!-- Android 12+ -->
+<uses-permission android:name="android.permission.NEARBY_WIFI_DEVICES" />
+<uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+<application android:usesCleartextTraffic="true"></application>
 ```
 
 ## iOS
@@ -43,6 +41,7 @@ npx cap sync
 import { app, BrowserWindow, session, ipcMain } from 'electron';
 import * as path from 'path';
 import * as url from 'url';
+
 // THIS LINE IS IMPORTANT FOR PLUGIN!
 import {TCPClient} from "@devioarts/capacitor-tcpclient/electron/tcpclient";
 
@@ -50,6 +49,7 @@ import express from 'express';
 import type { AddressInfo } from 'net';
 
 const isDev = !app.isPackaged;
+
 // THIS LINE IS IMPORTANT FOR PLUGIN!
 let tcpClient: TCPClient | null = null;
 
@@ -76,6 +76,7 @@ function createWindow() {
       sandbox: false,
     },
   });
+  
   // THIS LINE IS IMPORTANT FOR PLUGIN!
   tcpClient = new TCPClient(win);
 
@@ -101,6 +102,7 @@ app.on('window-all-closed', () => {
 ### electron/preload.cjs
 ```javascript
 const { contextBridge, ipcRenderer } = require("electron");
+
 // THIS LINE IS IMPORTANT FOR PLUGIN!
 const {createTCPClientAPI} = require("@devioarts/capacitor-tcpclient/electron/tcpclient-bridge.cjs");
 

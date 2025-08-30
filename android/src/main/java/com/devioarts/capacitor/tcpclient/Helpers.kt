@@ -115,7 +115,11 @@ object Helpers {
      * - Ignore commas or other separators
      */
     fun hexToBytes(str: String): ByteArray? {
-        val clean = str.replace(" ", "").lowercase()
+        // allow: "1b40", "1B 40", "0x1b 0x40", "1B40"
+        val clean = str
+            .lowercase()
+            .replace(Regex("""0x"""), "")   // strip 0x / 0X
+            .replace(" ", "")               // ignore spaces
         if (clean.isEmpty() || clean.length % 2 != 0) return null
         val out = ByteArray(clean.length / 2)
         var i = 0
