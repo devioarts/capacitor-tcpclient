@@ -25,7 +25,7 @@ class TCPClientPlugin : Plugin(), TCPClientDelegate {
      * - Result is resolved on UI thread for bridge stability across OEM WebViews.
      */
     @PluginMethod
-    fun tcpConnect(call: PluginCall) {
+    fun connect(call: PluginCall) {
         val host = call.getString("host")
         if (host.isNullOrEmpty()) { call.resolve(JSObject().put("error", true).put("errorMessage", "host is required").put("connected", false)); return }
         val port = call.getInt("port") ?: 9100
@@ -53,7 +53,7 @@ class TCPClientPlugin : Plugin(), TCPClientDelegate {
      * Also ensures stream reading is considered stopped from the JS perspective.
      */
     @PluginMethod
-    fun tcpDisconnect(call: PluginCall) {
+    fun disconnect(call: PluginCall) {
         tcpClient.disconnect()
         call.resolve(JSObject().put("error", false).put("errorMessage", null).put("disconnected", true).put("reading", false))
     }
@@ -63,7 +63,7 @@ class TCPClientPlugin : Plugin(), TCPClientDelegate {
      * Resolves with: { error, errorMessage, connected }
      */
     @PluginMethod
-    fun tcpIsConnected(call: PluginCall) {
+    fun isConnected(call: PluginCall) {
         call.resolve(JSObject().put("error", false).put("errorMessage", null).put("connected", tcpClient.isConnected()))
     }
 
@@ -72,25 +72,29 @@ class TCPClientPlugin : Plugin(), TCPClientDelegate {
      * Expects `data` as a JS array of numbers (0..255).
      * Resolves with: { error, errorMessage, bytesWritten }
      */
-@PluginMethod
-fun tcpWrite(call: PluginCall) {
-    val arr = call.getArray("data")
-    if (arr == null) {
-        call.resolve(JSObject().put("error", true).put("errorMessage", "data is required (number[])").put("bytesWritten", 0))
-        return
+    @PluginMethod
+    fun write(call: PluginCall) {
+        val jsArr = call.getArray("data")
+        val bytes: ByteArray? = when {
+            jsArr != null -> Helpers.jsArrayToBytes(jsArr)
+            else -> call.getObject("data")?.let { Helpers.jsonObjectToBytes(it) } // <-- Uint8Array fallback
+        }
+
+        if (bytes == null) {
+            call.resolve(JSObject()
+                .put("error", true)
+                .put("errorMessage", "invalid data (expected number[] / Uint8Array)")
+                .put("bytesWritten", 0))
+            return
+        }
+
+        tcpClient.write(bytes) { res ->
+            val obj = JSObject()
+            if (res.isSuccess) obj.put("error", false).put("errorMessage", null).put("bytesWritten", res.getOrNull())
+            else obj.put("error", true).put("errorMessage", "write failed: ${res.exceptionOrNull()?.message}").put("bytesWritten", 0)
+            bridge?.activity?.runOnUiThread { call.resolve(obj) }
+        }
     }
-    val bytes = Helpers.jsArrayToBytes(arr)
-    if (bytes == null) {
-        call.resolve(JSObject().put("error", true).put("errorMessage", "invalid data (expected number[])").put("bytesWritten", 0))
-        return
-    }
-    tcpClient.write(bytes) { res ->
-        val obj = JSObject()
-        if (res.isSuccess) obj.put("error", false).put("errorMessage", null).put("bytesWritten", res.getOrNull())
-        else obj.put("error", true).put("errorMessage", "write failed: ${res.exceptionOrNull()?.message}").put("bytesWritten", 0)
-        bridge?.activity?.runOnUiThread { call.resolve(obj) }
-    }
-}
 
     /**
      * Start continuous stream reading.
@@ -101,7 +105,7 @@ fun tcpWrite(call: PluginCall) {
      * The native layer emits 'tcpData' events with chunks as int arrays.
      */
     @PluginMethod
-    fun tcpStartRead(call: PluginCall) {
+    fun startRead(call: PluginCall) {
         val chunk = call.getInt("chunkSize") ?: 4096
         (call.getInt("timeoutMs") ?: call.getInt("readTimeoutMs"))?.let { tcpClient.setReadTimeout(it) }
         tcpClient.startRead(chunk)
@@ -113,7 +117,7 @@ fun tcpWrite(call: PluginCall) {
      * Resolves with: { error, errorMessage, reading:false }
      */
     @PluginMethod
-    fun tcpStopRead(call: PluginCall) {
+    fun stopRead(call: PluginCall) {
         tcpClient.stopRead()
         call.resolve(JSObject().put("error", false).put("errorMessage", null).put("reading", false))
     }
@@ -123,7 +127,7 @@ fun tcpWrite(call: PluginCall) {
      * Resolves with: { error, errorMessage, reading }
      */
     @PluginMethod
-    fun tcpIsReading(call: PluginCall) {
+    fun isReading(call: PluginCall) {
         call.resolve(JSObject().put("error", false).put("errorMessage", null).put("reading", tcpClient.isReading()))
     }
 
@@ -132,7 +136,7 @@ fun tcpWrite(call: PluginCall) {
      * Accepts 'timeoutMs' (preferred) or legacy 'ms'.
      */
     @PluginMethod
-    fun tcpSetReadTimeout(call: PluginCall) {
+    fun setReadTimeout(call: PluginCall) {
         val ms = call.getInt("timeoutMs") ?: call.getInt("ms") ?: 1000
         tcpClient.setReadTimeout(ms)
         call.resolve()
@@ -153,13 +157,18 @@ fun tcpWrite(call: PluginCall) {
      *   - other errors: { error:true, errorMessage, bytesWritten:0, bytesRead:0, data:[] }
      */
     @PluginMethod
-    fun tcpWriteAndRead(call: PluginCall) {
-        val arr = call.getArray("data")
-        if (arr == null) { call.resolve(JSObject().put("error", true).put("errorMessage", "data is required (number[])").put("bytesWritten", 0).put("bytesRead", 0).put("data", JSArray())); return }
-        val bytes = Helpers.jsArrayToBytes(arr)
+    fun writeAndRead(call: PluginCall) {
+        val jsArr = call.getArray("data")
+        val bytes: ByteArray? = when {
+            jsArr != null -> Helpers.jsArrayToBytes(jsArr)
+            else -> call.getObject("data")?.let { Helpers.jsonObjectToBytes(it) } // <-- Uint8Array fallback
+        }
+
         if (bytes == null) {
-            call.resolve(JSObject().put("error", true).put("errorMessage", "invalid data (expected number[])")
-                .put("bytesWritten", 0).put("bytesRead", 0).put("data", JSArray()))
+            call.resolve(JSObject()
+                .put("error", true)
+                .put("errorMessage", "invalid data (expected number[] / Uint8Array)")
+                .put("bytesWritten", 0))
             return
         }
 
@@ -173,12 +182,25 @@ fun tcpWrite(call: PluginCall) {
         val expectStr = call.getString("expect")
         if (!expectStr.isNullOrBlank()) {
             val pat = Helpers.hexToBytes(expectStr)
-            if (pat != null) matcher = { buf -> Helpers.indexOf(buf, pat) >= 0 }
+            if (pat != null) {
+                matcher = { buf -> Helpers.indexOf(buf, pat) >= 0 }
+            } else {
+                call.resolve(JSObject().put("error", true).put("errorMessage", "invalid expect (hex)")
+                    .put("bytesWritten", 0).put("bytesRead", 0).put("data", JSArray()))
+                return
+            }
+
         } else {
             val expectArr = call.getArray("expect")
             if (expectArr != null) {
                 val pat = Helpers.jsArrayToBytes(expectArr)
-                matcher = { buf -> Helpers.indexOf(buf, pat) >= 0 }
+                if (pat != null) {
+                    matcher = { buf -> Helpers.indexOf(buf, pat) >= 0 }
+                } else {
+                    call.resolve(JSObject().put("error", true).put("errorMessage", "invalid expect (number[])")
+                        .put("bytesWritten", 0).put("bytesRead", 0).put("data", JSArray()))
+                    return
+                }
             }
         }
 

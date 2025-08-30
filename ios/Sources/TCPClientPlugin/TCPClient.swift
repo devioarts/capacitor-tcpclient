@@ -130,7 +130,7 @@ final class TCPClient {
                         $0.withMemoryRebound(to: sockaddr_in.self, capacity: 1) { $0.pointee }
                     }
                     sin.sin_port = CFSwapInt16HostToBig(port)
-                    withUnsafePointer(to: &sin) {
+                    _ = withUnsafePointer(to: &sin) {
                         $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
                             memcpy(&sa, $0, MemoryLayout<sockaddr_in>.size)
                         }
@@ -141,7 +141,7 @@ final class TCPClient {
                         $0.withMemoryRebound(to: sockaddr_in6.self, capacity: 1) { $0.pointee }
                     }
                     sin6.sin6_port = CFSwapInt16HostToBig(port)
-                    withUnsafePointer(to: &sin6) {
+                    _ = withUnsafePointer(to: &sin6) {
                         $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
                             memcpy(&sa, $0, MemoryLayout<sockaddr_in6>.size)
                         }
@@ -202,9 +202,19 @@ final class TCPClient {
             if connected {
                 completion(.success(()))
             } else {
-                // We intentionally collapse all connect failures to a timeout-like error,
-                // matching the cross-platform surface.
-                completion(.failure(TcpError.connectTimeout))
+                if lastErr == ETIMEDOUT {
+                    completion(.failure(TcpError.connectTimeout))
+                } else if lastErr != 0 {
+                    // Přesnější POSIX chyba (ECONNREFUSED, ENETUNREACH, apod.)
+                    let msg = String(cString: strerror(lastErr))
+                    let err = NSError(domain: NSPOSIXErrorDomain,
+                                      code: Int(lastErr),
+                                      userInfo: [NSLocalizedDescriptionKey: msg])
+                    completion(.failure(err))
+                } else {
+                    // Fallback – pro případ, že se errno “ztratilo”
+                    completion(.failure(TcpError.connectTimeout))
+                }
             }
         }
     }

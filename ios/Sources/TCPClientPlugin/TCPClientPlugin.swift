@@ -26,15 +26,15 @@ public class TCPClientPlugin: CAPPlugin, CAPBridgedPlugin, TcpClientDelegate {
     public let jsName = "TCPClient"
     public let pluginMethods: [CAPPluginMethod] = [
         // Promise-returning methods exposed to JS
-        CAPPluginMethod(name: "tcpConnect", returnType: CAPPluginReturnPromise),
-        CAPPluginMethod(name: "tcpDisconnect", returnType: CAPPluginReturnPromise),
-        CAPPluginMethod(name: "tcpIsConnected", returnType: CAPPluginReturnPromise),
-        CAPPluginMethod(name: "tcpStartRead", returnType: CAPPluginReturnPromise),
-        CAPPluginMethod(name: "tcpStopRead", returnType: CAPPluginReturnPromise),
-        CAPPluginMethod(name: "tcpIsReading", returnType: CAPPluginReturnPromise),
-        CAPPluginMethod(name: "tcpWrite", returnType: CAPPluginReturnPromise),
-        CAPPluginMethod(name: "tcpWriteAndRead", returnType: CAPPluginReturnPromise),
-        CAPPluginMethod(name: "tcpSetReadTimeout", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "connect", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "disconnect", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "isConnected", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "startRead", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "stopRead", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "isReading", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "write", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "writeAndRead", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "setReadTimeout", returnType: CAPPluginReturnPromise),
     ]
     private let tcpClient = TCPClient()
     // UI-facing reading flag (kept in sync with the native client's read source)
@@ -51,7 +51,7 @@ public class TCPClientPlugin: CAPPlugin, CAPBridgedPlugin, TcpClientDelegate {
     // MARK: Capacitor methods
         /// Connect to the remote TCP endpoint. Mirrors Android parameters for parity.
         /// Resolves with { error, errorMessage, connected }.
-        @objc func tcpConnect(_ call: CAPPluginCall) {
+        @objc func connect(_ call: CAPPluginCall) {
             guard let host = call.getString("host") else { call.reject("host is required"); return }
 
             let portInt = call.getInt("port") ?? 9100
@@ -79,7 +79,7 @@ public class TCPClientPlugin: CAPPlugin, CAPBridgedPlugin, TcpClientDelegate {
 
         /// Disconnect from the remote peer. Also stops any ongoing stream read.
         /// Resolves with { error, errorMessage, disconnected }.
-        @objc func tcpDisconnect(_ call: CAPPluginCall) {
+        @objc func disconnect(_ call: CAPPluginCall) {
             isReading = false
             tcpClient.stopRead()
             tcpClient.disconnect()
@@ -88,17 +88,17 @@ public class TCPClientPlugin: CAPPlugin, CAPBridgedPlugin, TcpClientDelegate {
 
         /// Returns the current socket connection state.
         /// Resolves with { error, errorMessage, connected }.
-        @objc func tcpIsConnected(_ call: CAPPluginCall) {
+        @objc func isConnected(_ call: CAPPluginCall) {
             call.resolve(["error": false, "errorMessage": NSNull(), "connected": tcpClient.isConnected()])
         }
 
         /// Writes raw bytes to the socket. Expects `data` as number[] (0..255).
         /// Resolves with { error, errorMessage, bytesWritten }.
-        @objc func tcpWrite(_ call: CAPPluginCall) {
-            guard let arr = call.getArray("data", Int.self) else {
-                call.resolve(["error": true, "errorMessage": "data is required (number[])", "bytesWritten": 0]); return
-            }
-            let bytes = arr.map { UInt8(truncatingIfNeeded: $0) }
+        @objc func write(_ call: CAPPluginCall) {
+            guard let bytes = getBytes(from: call, key: "data") else {
+                    call.resolve(["error": true, "errorMessage": "data is required (number[] | Uint8Array)", "bytesWritten": 0])
+                    return
+                }
             tcpClient.write(bytes) { result in
                 switch result {
                 case .success(let n): call.resolve(["error": false, "errorMessage": NSNull(), "bytesWritten": n])
@@ -110,7 +110,7 @@ public class TCPClientPlugin: CAPPlugin, CAPBridgedPlugin, TcpClientDelegate {
         /// Starts continuous stream reading with the given chunk size.
         /// Also remembers `chunkSize` so we can resume after a write-and-read cycle.
         /// Resolves with { error, errorMessage, reading }.
-        @objc func tcpStartRead(_ call: CAPPluginCall) {
+        @objc func startRead(_ call: CAPPluginCall) {
             let chunk = call.getInt("chunkSize") ?? 4096
 
             lastChunkSize = chunk
@@ -122,7 +122,7 @@ public class TCPClientPlugin: CAPPlugin, CAPBridgedPlugin, TcpClientDelegate {
 
         /// Stops the current stream reading, if any.
         /// Resolves with { error, errorMessage, reading:false }.
-        @objc func tcpStopRead(_ call: CAPPluginCall) {
+        @objc func stopRead(_ call: CAPPluginCall) {
             isReading = false
             tcpClient.stopRead()
             call.resolve(["error": false, "errorMessage": NSNull(), "reading": false])
@@ -130,7 +130,7 @@ public class TCPClientPlugin: CAPPlugin, CAPBridgedPlugin, TcpClientDelegate {
         
         /// Returns whether the plugin believes a stream read is active.
         /// We AND it with `isConnected` to avoid stale "true" after disconnects.
-        @objc func tcpIsReading(_ call: CAPPluginCall) {
+        @objc func isReading(_ call: CAPPluginCall) {
             let readingNow = isReading && tcpClient.isConnected()
             call.resolve(["error": false, "errorMessage": NSNull(), "reading": readingNow])
         }
@@ -142,11 +142,11 @@ public class TCPClientPlugin: CAPPlugin, CAPBridgedPlugin, TcpClientDelegate {
         /// - `suspendStreamDuringRR`: if true and streaming is active, suspend it to avoid consuming the response
         /// On success resolves with { error:false, bytesWritten, bytesRead, data:number[] }.
         /// On timeout resolves error:true but `bytesWritten` may still reflect the request length.
-        @objc func tcpWriteAndRead(_ call: CAPPluginCall) {
-            guard let arr = call.getArray("data", Int.self) else {
-                call.resolve(["error": true, "errorMessage": "data is required (number[])", "bytesWritten": 0, "bytesRead": 0, "data": []]); return
-            }
-            let bytes = arr.map { UInt8(truncatingIfNeeded: $0) }
+        @objc func writeAndRead(_ call: CAPPluginCall) {
+            guard let bytes = getBytes(from: call, key: "data") else {
+                    call.resolve(["error": true, "errorMessage": "data is required (number[] | Uint8Array)", "bytesWritten": 0, "bytesRead": 0, "data": []])
+                    return
+                }
             let timeout = call.getInt("timeoutMs") ?? 1000
             let maxBytes = call.getInt("maxBytes") ?? 4096
             
@@ -154,14 +154,17 @@ public class TCPClientPlugin: CAPPlugin, CAPBridgedPlugin, TcpClientDelegate {
             let shouldResume = suspendRR && isReading
             if shouldResume { tcpClient.stopRead() }
 
-            // Optional pattern matcher: "expect" can be hex string or number[]
-            var matcher: ((Data) -> Bool)? = nil
-            if let hex = call.getString("expect"), let pat = Data(hexString: hex) {
-                matcher = { buf in buf.range(of: pat) != nil }
-            } else if let arrPat = call.getArray("expect", Int.self) {
-                let pat = Data(arrPat.map { UInt8(truncatingIfNeeded: $0) })
-                matcher = { buf in buf.range(of: pat) != nil }
-            }
+    var matcher: ((Data) -> Bool)? = nil
+    if let hex = call.getString("expect"), let pat = Data(hexString: hex) {
+        matcher = { buf in buf.range(of: pat) != nil }
+    } else if let arrPat = call.getArray("expect", Int.self) {
+        let pat = Data(arrPat.map { UInt8(truncatingIfNeeded: $0) })
+        matcher = { buf in buf.range(of: pat) != nil }
+    } else if let obj = call.options["expect"] as? [String: Any],
+              let patBytes = bytesFromIndexedObject(obj) {
+        let pat = Data(patBytes)
+        matcher = { buf in buf.range(of: pat) != nil }
+    }
 
             tcpClient.writeAndRead(bytes, timeoutMs: timeout, maxBytes: maxBytes, expect: matcher) { result in
                 switch result {
@@ -203,7 +206,7 @@ public class TCPClientPlugin: CAPPlugin, CAPBridgedPlugin, TcpClientDelegate {
         /// iOS doesn't support socket read timeouts in the same way as Android (Network.framework).
         /// Expose a no-op to keep the API surface consistent across platforms.
         // Parita s Androidem – na iOS nemá efekt (Network.framework nemá soTimeout)
-        @objc func tcpSetReadTimeout(_ call: CAPPluginCall) {
+        @objc func setReadTimeout(_ call: CAPPluginCall) {
             call.resolve() // no-op
         }
         
@@ -226,6 +229,46 @@ public class TCPClientPlugin: CAPPlugin, CAPBridgedPlugin, TcpClientDelegate {
                 self.notifyListeners("tcpDisconnect", data: payload)
             }
         }
+    
+    // Fallback: přečti bytes i z objektu ve tvaru Uint8Array ({"0":n, "1":n, ..., length:n})
+    private func bytesFromIndexedObject(_ obj: [String: Any]) -> [UInt8]? {
+        // délka: preferuj explicitní "length", jinak dopočítej z max. indexu
+        let len: Int = {
+            if let l = obj["length"] as? Int, l >= 0 { return l }
+            var maxIdx = -1
+            for (k, _) in obj {
+                if let i = Int(k), i > maxIdx { maxIdx = i }
+            }
+            return maxIdx + 1
+        }()
+        guard len > 0 else { return nil }
+
+        var out = [UInt8](repeating: 0, count: len)
+        for i in 0..<len {
+            let key = String(i)
+            guard let v = obj[key] else { return nil }
+            if let n = v as? NSNumber {
+                out[i] = UInt8(truncatingIfNeeded: n.intValue)
+            } else if let s = v as? String, let n = Int(s) {
+                out[i] = UInt8(truncatingIfNeeded: n)
+            } else {
+                return nil
+            }
+        }
+        return out
+    }
+
+    // Jednotný getter: preferuje number[], jinak zkusí indexed object
+    private func getBytes(from call: CAPPluginCall, key: String) -> [UInt8]? {
+        if let arr = call.getArray(key, Int.self) {
+            return arr.map { UInt8(truncatingIfNeeded: $0) }
+        }
+        if let obj = call.options[key] as? [String: Any] {
+            return bytesFromIndexedObject(obj)
+        }
+        return nil
+    }
+
 }
 
 // Helper: Hex → Data (tolerant to whitespace and 0x prefixes, case-insensitive)

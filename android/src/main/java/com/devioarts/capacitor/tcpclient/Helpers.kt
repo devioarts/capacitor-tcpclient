@@ -2,6 +2,7 @@
 package com.devioarts.capacitor.tcpclient
 
 import com.getcapacitor.JSArray
+import org.json.JSONObject
 
 /**
  * Helper utilities for bridging binary data between Kotlin/Android and the Capacitor JS layer.
@@ -16,6 +17,37 @@ import com.getcapacitor.JSArray
  * - All conversions mask to 0..255 to stay within byte boundaries expected by JS consumers.
  */
 object Helpers {
+
+    /**
+     * Accepts {"0":72, "1":101, ...} (optionally with "length") and builds a ByteArray.
+     * Returns null if indices are missing or non-numeric.
+     */
+    fun jsonObjectToBytes(obj: JSONObject): ByteArray? {
+        val explicitLen = if (obj.has("length")) obj.optInt("length", -1) else -1
+        val len = if (explicitLen >= 0) {
+            explicitLen
+        } else {
+            var max = -1
+            val it = obj.keys()
+            while (it.hasNext()) {
+                val k = it.next()
+                val idx = k.toIntOrNull() ?: continue
+                if (idx > max) max = idx
+            }
+            max + 1
+        }
+        if (len <= 0) return null
+
+        val out = ByteArray(len)
+        for (i in 0 until len) {
+            val key = i.toString()
+            if (!obj.has(key)) return null
+            val v = obj.optInt(key, Int.MIN_VALUE)
+            if (v == Int.MIN_VALUE) return null
+            out[i] = (v and 0xFF).toByte()
+        }
+        return out
+    }
 
     /**
      * Convert a Capacitor JSArray (numbers 0..255) into a ByteArray.

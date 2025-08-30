@@ -38,7 +38,7 @@ declare global {
        * - noDelay: true
        * - keepAlive: true
        */
-      tcpConnect(args: {
+      connect(args: {
         host: string;
         port?: number;
         timeoutMs?: number;
@@ -47,38 +47,38 @@ declare global {
       }): Promise<TCPStd<{ connected: boolean }>>;
 
       /** Close the current connection; also reports { reading:false } for UI parity. */
-      tcpDisconnect(): Promise<TCPStd<{ disconnected: boolean; reading?: boolean }>>;
+      disconnect(): Promise<TCPStd<{ disconnected: boolean; reading?: boolean }>>;
 
       /** Quick connection health check. */
-      tcpIsConnected(): Promise<TCPStd<{ connected: boolean }>>;
+      isConnected(): Promise<TCPStd<{ connected: boolean }>>;
 
       /** Whether the streaming reader is currently active. */
-      tcpIsReading(): Promise<TCPStd<{ reading: boolean }>>;
+      isReading(): Promise<TCPStd<{ reading: boolean }>>;
 
       /** Write raw bytes. */
-      tcpWrite(args: { data: number[] }): Promise<TCPStd<{ bytesWritten: number }>>;
+      write(args: { data: number[] }): Promise<TCPStd<{ bytesWritten: number }>>;
 
       /**
        * Begin continuous reading. Large frames may be split into multiple events
        * according to the configured chunkSize.
        */
-      tcpStartRead(args?: {
+      startRead(args?: {
         chunkSize?: number;
         timeoutMs?: number; // logical read timeout used by the main process helper
       }): Promise<TCPStd<{ reading: boolean }>>;
 
       /** Stop continuous reading. */
-      tcpStopRead(): Promise<TCPStd<{ reading: boolean }>>;
+      stopRead(): Promise<TCPStd<{ reading: boolean }>>;
 
       /** Configure logical read timeout in milliseconds (used by request/response helper). */
-      tcpSetReadTimeout(args: { timeoutMs: number }): Promise<TCPStd>;
+      setReadTimeout(args: { timeoutMs: number }): Promise<TCPStd>;
 
       /**
        * Request/Response helper: write bytes and collect a reply with optional early-exit pattern.
        * - `expect` accepts a hex string or number[].
        * - On timeout, bytesWritten may still be non-null while bytesRead is null.
        */
-      tcpWriteAndRead(args: {
+      writeAndRead(args: {
         data: number[];
         timeoutMs?: number;
         maxBytes?: number;

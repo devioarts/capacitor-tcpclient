@@ -1,9 +1,10 @@
 // electron/main/tcpclient.ts
-import type {ExpectInput} from '../src/utils/expect'
 
 import type { BrowserWindow } from 'electron';
 import { ipcMain } from 'electron';
 import net from 'net';
+
+import type {ExpectInput} from '../src/utils/expect'
 import { parseExpectBytes } from '../src/utils/expect';
 
 
@@ -45,15 +46,15 @@ export class TCPClient {
     this.win = win;
 
     // Register IPC handlers (main process). The preload/renderer will invoke these via ipcRenderer.invoke.
-    ipcMain.handle('tcpclient:tcpConnect',        (_e, args) => this.tcpConnect(args));
-    ipcMain.handle('tcpclient:tcpDisconnect',     () => this.tcpDisconnect());
-    ipcMain.handle('tcpclient:tcpIsConnected',    () => this.tcpIsConnected());
-    ipcMain.handle('tcpclient:tcpIsReading',      () => this.tcpIsReading());
-    ipcMain.handle('tcpclient:tcpWrite',          (_e, args) => this.tcpWrite(args));
-    ipcMain.handle('tcpclient:tcpStartRead',      (_e, args) => this.tcpStartRead(args));
-    ipcMain.handle('tcpclient:tcpStopRead',       () => this.tcpStopRead());
-    ipcMain.handle('tcpclient:tcpSetReadTimeout', (_e, args) => this.tcpSetReadTimeout(args));
-    ipcMain.handle('tcpclient:tcpWriteAndRead',   (_e, args) => this.tcpWriteAndRead(args));
+    ipcMain.handle('tcpclient:connect',        (_e, args) => this.connect(args));
+    ipcMain.handle('tcpclient:disconnect',     () => this.disconnect());
+    ipcMain.handle('tcpclient:isConnected',    () => this.isConnected());
+    ipcMain.handle('tcpclient:isReading',      () => this.isReading());
+    ipcMain.handle('tcpclient:write',          (_e, args) => this.write(args));
+    ipcMain.handle('tcpclient:startRead',      (_e, args) => this.startRead(args));
+    ipcMain.handle('tcpclient:stopRead',       () => this.stopRead());
+    ipcMain.handle('tcpclient:setReadTimeout', (_e, args) => this.setReadTimeout(args));
+    ipcMain.handle('tcpclient:writeAndRead',   (_e, args) => this.writeAndRead(args));
   }
 
   /** Emit an event to the renderer with a stable name prefix. */
@@ -84,7 +85,7 @@ export class TCPClient {
    * - Sets up a connection timeout via setTimeout; clears listeners accordingly.
    * Resolves with a standardized result shape.
    */
-  async tcpConnect(args: {
+  async connect(args: {
     host: string; port?: number; timeoutMs?: number; noDelay?: boolean; keepAlive?: boolean;
   }): Promise<Std<{ connected: boolean }>> {
     const host = args.host;
@@ -94,7 +95,7 @@ export class TCPClient {
     const keepAlive = args.keepAlive ?? true;
 
     // ensure clean state (neemituje "manual", pokud žádný socket nebyl)
-    await this.tcpDisconnect();
+    await this.disconnect();
 
     return new Promise<Std<{ connected: boolean }>>((resolve) => {
       try {
@@ -147,8 +148,8 @@ export class TCPClient {
    * - Unregisters the 'close' handler before destroy() to avoid duplicate disconnect events.
    * - Notifies the renderer with a 'manual' disconnect event.
    */
-  async tcpDisconnect(): Promise<Std<{ disconnected: boolean; reading?: boolean }>> {
-    await this.tcpStopRead(); // sets this.reading = false
+  async disconnect(): Promise<Std<{ disconnected: boolean; reading?: boolean }>> {
+    await this.stopRead(); // sets this.reading = false
 
     const s = this.sock;
     this.sock = null;
@@ -164,12 +165,12 @@ export class TCPClient {
   }
 
   /** Quick connection status (main process side). */
-  async tcpIsConnected(): Promise<Std<{ connected: boolean }>> {
+  async isConnected(): Promise<Std<{ connected: boolean }>> {
     return ok({ connected: this.isOpen() });
   }
 
   /** Whether stream reading is currently enabled from the renderer's perspective. */
-  async tcpIsReading(): Promise<Std<{ reading: boolean }>> {
+  async isReading(): Promise<Std<{ reading: boolean }>> {
     return ok({ reading: this.reading });
   }
 
@@ -178,7 +179,7 @@ export class TCPClient {
    * - Fails if no connection or an RR cycle is active.
    * - Uses Node's write callback to resolve success/failure.
    */
-  async tcpWrite(args: { data: number[] }): Promise<Std<{ bytesWritten: number }>> {
+  async write(args: { data: number[] }): Promise<Std<{ bytesWritten: number }>> {
     if (!this.isOpen() || !this.sock) return fail('not connected', { bytesWritten: 0 });
     if (this.rrInFlight) return fail('busy', { bytesWritten: 0 });
 
@@ -197,7 +198,7 @@ export class TCPClient {
    *   emitting multiple tcpData events to the renderer.
    * - Idempotent: if already reading, returns reading:true without changing handlers.
    */
-  async tcpStartRead(args: { chunkSize?: number; readTimeoutMs?: number }): Promise<Std<{ reading: boolean }>> {
+  async startRead(args: { chunkSize?: number; readTimeoutMs?: number }): Promise<Std<{ reading: boolean }>> {
     if (!this.isOpen() || !this.sock) return ok({ reading: false });
     if (this.reading) return ok({ reading: true });
     this.reading = true;
@@ -217,7 +218,7 @@ export class TCPClient {
   }
 
   /** Stop streaming read and remove the current 'data' handler (if any). */
-  async tcpStopRead(): Promise<Std<{ reading: boolean }>> {
+  async stopRead(): Promise<Std<{ reading: boolean }>> {
     if (this.sock && this.streamDataHandler) {
       this.sock.off('data', this.streamDataHandler);
     }
@@ -227,7 +228,7 @@ export class TCPClient {
   }
 
   /** Store a logical read timeout used by the RR helper. */
-  async tcpSetReadTimeout(args: { ms: number }): Promise<Std> {
+  async setReadTimeout(args: { ms: number }): Promise<Std> {
     this.readTimeoutMs = Math.max(1, args?.ms ?? 1000);
     return ok();
   }
@@ -241,7 +242,7 @@ export class TCPClient {
    *   c) timeout fires.
    * - Ensures cleanup of listeners and internal flags in all paths.
    */
-  async tcpWriteAndRead(args: {
+  async writeAndRead(args: {
     data: number[];
     timeoutMs?: number;
     maxBytes?: number;

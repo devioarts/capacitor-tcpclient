@@ -116,15 +116,15 @@ contextBridge.exposeInMainWorld('TCPClient', createTCPClientAPI({ ipcRenderer })
 
 <docgen-index>
 
-* [`tcpConnect(...)`](#tcpconnect)
-* [`tcpWrite(...)`](#tcpwrite)
-* [`tcpWriteAndRead(...)`](#tcpwriteandread)
-* [`tcpStartRead(...)`](#tcpstartread)
-* [`tcpStopRead()`](#tcpstopread)
-* [`tcpIsConnected()`](#tcpisconnected)
-* [`tcpDisconnect()`](#tcpdisconnect)
-* [`tcpIsReading()`](#tcpisreading)
-* [`tcpSetReadTimeout(...)`](#tcpsetreadtimeout)
+* [`connect(...)`](#connect)
+* [`write(...)`](#write)
+* [`writeAndRead(...)`](#writeandread)
+* [`startRead(...)`](#startread)
+* [`stopRead()`](#stopread)
+* [`isConnected()`](#isconnected)
+* [`disconnect()`](#disconnect)
+* [`isReading()`](#isreading)
+* [`setReadTimeout(...)`](#setreadtimeout)
 * [`addListener('tcpData', ...)`](#addlistenertcpdata-)
 * [`addListener('tcpDisconnect', ...)`](#addlistenertcpdisconnect-)
 * [`removeAllListeners()`](#removealllisteners)
@@ -147,10 +147,10 @@ if (!res.error && res.connected) {
 }
 ```
 
-### tcpConnect(...)
+### connect(...)
 
 ```typescript
-tcpConnect(options: TcpConnectOptions) => Promise<TcpConnectResult>
+connect(options: TcpConnectOptions) => Promise<TcpConnectResult>
 ```
 
 | Param         | Type                                                            |
@@ -162,10 +162,10 @@ tcpConnect(options: TcpConnectOptions) => Promise<TcpConnectResult>
 --------------------
 
 
-### tcpWrite(...)
+### write(...)
 
 ```typescript
-tcpWrite(options: TcpWriteOptions) => Promise<TcpWriteResult>
+write(options: TcpWriteOptions) => Promise<TcpWriteResult>
 ```
 
 | Param         | Type                                                        |
@@ -177,10 +177,10 @@ tcpWrite(options: TcpWriteOptions) => Promise<TcpWriteResult>
 --------------------
 
 
-### tcpWriteAndRead(...)
+### writeAndRead(...)
 
 ```typescript
-tcpWriteAndRead(options: TcpWriteAndReadOptions) => Promise<TcpWriteAndReadResult>
+writeAndRead(options: TcpWriteAndReadOptions) => Promise<TcpWriteAndReadResult>
 ```
 
 | Param         | Type                                                                      |
@@ -192,10 +192,10 @@ tcpWriteAndRead(options: TcpWriteAndReadOptions) => Promise<TcpWriteAndReadResul
 --------------------
 
 
-### tcpStartRead(...)
+### startRead(...)
 
 ```typescript
-tcpStartRead(options?: TcpStartReadOptions | undefined) => Promise<TcpStartStopResult>
+startRead(options?: TcpStartReadOptions | undefined) => Promise<TcpStartStopResult>
 ```
 
 | Param         | Type                                                                |
@@ -207,10 +207,10 @@ tcpStartRead(options?: TcpStartReadOptions | undefined) => Promise<TcpStartStopR
 --------------------
 
 
-### tcpStopRead()
+### stopRead()
 
 ```typescript
-tcpStopRead() => Promise<TcpStartStopResult>
+stopRead() => Promise<TcpStartStopResult>
 ```
 
 **Returns:** <code>Promise&lt;<a href="#tcpstartstopresult">TcpStartStopResult</a>&gt;</code>
@@ -218,10 +218,10 @@ tcpStopRead() => Promise<TcpStartStopResult>
 --------------------
 
 
-### tcpIsConnected()
+### isConnected()
 
 ```typescript
-tcpIsConnected() => Promise<TcpIsConnectedResult>
+isConnected() => Promise<TcpIsConnectedResult>
 ```
 
 **Returns:** <code>Promise&lt;<a href="#tcpisconnectedresult">TcpIsConnectedResult</a>&gt;</code>
@@ -229,10 +229,10 @@ tcpIsConnected() => Promise<TcpIsConnectedResult>
 --------------------
 
 
-### tcpDisconnect()
+### disconnect()
 
 ```typescript
-tcpDisconnect() => Promise<TcpDisconnectResult>
+disconnect() => Promise<TcpDisconnectResult>
 ```
 
 **Returns:** <code>Promise&lt;<a href="#tcpdisconnectresult">TcpDisconnectResult</a>&gt;</code>
@@ -240,10 +240,10 @@ tcpDisconnect() => Promise<TcpDisconnectResult>
 --------------------
 
 
-### tcpIsReading()
+### isReading()
 
 ```typescript
-tcpIsReading() => Promise<TcpIsReadingResult>
+isReading() => Promise<TcpIsReadingResult>
 ```
 
 **Returns:** <code>Promise&lt;<a href="#tcpisreadingresult">TcpIsReadingResult</a>&gt;</code>
@@ -251,10 +251,10 @@ tcpIsReading() => Promise<TcpIsReadingResult>
 --------------------
 
 
-### tcpSetReadTimeout(...)
+### setReadTimeout(...)
 
 ```typescript
-tcpSetReadTimeout(options: { ms: number; }) => Promise<BaseResult>
+setReadTimeout(options: { ms: number; }) => Promise<BaseResult>
 ```
 
 | Param         | Type                         |

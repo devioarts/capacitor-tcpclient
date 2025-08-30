@@ -128,15 +128,15 @@ export interface TCPClientPlugin {
   /*
    * TCP
    */
-  tcpConnect(options: TcpConnectOptions): Promise<TcpConnectResult>;
-  tcpWrite(options: TcpWriteOptions): Promise<TcpWriteResult>;
-  tcpWriteAndRead(options: TcpWriteAndReadOptions): Promise<TcpWriteAndReadResult>;
-  tcpStartRead(options?: TcpStartReadOptions): Promise<TcpStartStopResult>;
-  tcpStopRead(): Promise<TcpStartStopResult>;
-  tcpIsConnected(): Promise<TcpIsConnectedResult>;
-  tcpDisconnect(): Promise<TcpDisconnectResult>;
-  tcpIsReading(): Promise<TcpIsReadingResult>;
-  tcpSetReadTimeout(options: { ms: number }): Promise<BaseResult>;
+  connect(options: TcpConnectOptions): Promise<TcpConnectResult>;
+  write(options: TcpWriteOptions): Promise<TcpWriteResult>;
+  writeAndRead(options: TcpWriteAndReadOptions): Promise<TcpWriteAndReadResult>;
+  startRead(options?: TcpStartReadOptions): Promise<TcpStartStopResult>;
+  stopRead(): Promise<TcpStartStopResult>;
+  isConnected(): Promise<TcpIsConnectedResult>;
+  disconnect(): Promise<TcpDisconnectResult>;
+  isReading(): Promise<TcpIsReadingResult>;
+  setReadTimeout(options: { ms: number }): Promise<BaseResult>;
 
   /*
    * Events
