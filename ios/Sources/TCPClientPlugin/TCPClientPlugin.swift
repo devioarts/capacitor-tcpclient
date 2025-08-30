@@ -70,7 +70,7 @@ public class TCPClientPlugin: CAPPlugin, CAPBridgedPlugin, TcpClientDelegate {
                 switch result {
                 case .success:
                     // Optional: reassert delegate after successful connect (harmless redundancy).
-                    self.tcpClient.delegate = self   // volitelné
+                    self.tcpClient.delegate = self   // optional
                     call.resolve(["error": false, "errorMessage": NSNull(), "connected": true])
                 case .failure(let e): call.resolve(["error": true, "errorMessage": "connect failed: \(e.localizedDescription)", "connected": false])
                 }
@@ -203,11 +203,10 @@ public class TCPClientPlugin: CAPPlugin, CAPBridgedPlugin, TcpClientDelegate {
             }
         }
         
-        /// iOS doesn't support socket read timeouts in the same way as Android (Network.framework).
-        /// Expose a no-op to keep the API surface consistent across platforms.
-        // Parita s Androidem – na iOS nemá efekt (Network.framework nemá soTimeout)
+        /// iOS doesn't expose a socket-level read timeout like Android's SO_TIMEOUT.
+        /// Provide a no-op to keep the cross-platform API surface consistent.
         @objc func setReadTimeout(_ call: CAPPluginCall) {
-            call.resolve() // no-op
+            call.resolve() // no-op on iOS
         }
         
         /// Called when the underlying socket disconnects (manual, remote EOF, or error).
@@ -230,9 +229,9 @@ public class TCPClientPlugin: CAPPlugin, CAPBridgedPlugin, TcpClientDelegate {
             }
         }
     
-    // Fallback: přečti bytes i z objektu ve tvaru Uint8Array ({"0":n, "1":n, ..., length:n})
+    // Fallback: also parse bytes from an object shaped like a Uint8Array ({"0":n, "1":n, ..., length:n})
     private func bytesFromIndexedObject(_ obj: [String: Any]) -> [UInt8]? {
-        // délka: preferuj explicitní "length", jinak dopočítej z max. indexu
+        // Determine length: prefer explicit "length", otherwise infer from the highest numeric key
         let len: Int = {
             if let l = obj["length"] as? Int, l >= 0 { return l }
             var maxIdx = -1
@@ -258,7 +257,7 @@ public class TCPClientPlugin: CAPPlugin, CAPBridgedPlugin, TcpClientDelegate {
         return out
     }
 
-    // Jednotný getter: preferuje number[], jinak zkusí indexed object
+    // Unified getter: prefer a number[] first; otherwise try the indexed object form
     private func getBytes(from call: CAPPluginCall, key: String) -> [UInt8]? {
         if let arr = call.getArray(key, Int.self) {
             return arr.map { UInt8(truncatingIfNeeded: $0) }

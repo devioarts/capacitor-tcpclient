@@ -205,14 +205,14 @@ final class TCPClient {
                 if lastErr == ETIMEDOUT {
                     completion(.failure(TcpError.connectTimeout))
                 } else if lastErr != 0 {
-                    // Přesnější POSIX chyba (ECONNREFUSED, ENETUNREACH, apod.)
+                    // Return a precise POSIX error (e.g., ECONNREFUSED, ENETUNREACH, etc.).
                     let msg = String(cString: strerror(lastErr))
                     let err = NSError(domain: NSPOSIXErrorDomain,
                                       code: Int(lastErr),
                                       userInfo: [NSLocalizedDescriptionKey: msg])
                     completion(.failure(err))
                 } else {
-                    // Fallback – pro případ, že se errno “ztratilo”
+                    // Fallback in case errno got lost; treat it as a connect timeout.
                     completion(.failure(TcpError.connectTimeout))
                 }
             }
