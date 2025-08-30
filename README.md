@@ -10,25 +10,23 @@ npx cap sync
 ```
 
 ## Android
-### CapacitorJS
-
----
-
-
-## iOS
-### CapacitorJS
-
-```bash
-npm install @capacitor/ios
-npm run build
-npx cap add ios --packagemanager SPM
+#### /android/app/src/main/AndroidManifest.xml
+```xml
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!-- Android 12+ -->
+    <uses-permission android:name="android.permission.NEARBY_WIFI_DEVICES" />
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <application
+            android:usesCleartextTraffic="true">
+    </application>
 ```
 
-### info.plist
-
-```file:ios/App/App/Info.plist
+## iOS
+#### /ios/App/App/Info.plist
+```xml
 <key>NSLocalNetworkUsageDescription</key>
-<string>TCPClient connection</string>
+<string>It is needed for the correct functioning of the application</string>
 <key>NSAppTransportSecurity</key>
 <dict>
   <key>NSAllowsLocalNetworking</key>
@@ -37,20 +35,22 @@ npx cap add ios --packagemanager SPM
 ```
 ---
 ## ElectronJS
-### electron/main.ts
+> Implementation example was developed on [capacitor-electron](https://github.com/devioarts/capacitor-examples/tree/main/capacitor-electron)
+> base, if you run electron differently, you may need to adjust the code.
+#### /electron/main.ts
 
 ```typescript
 import { app, BrowserWindow, session, ipcMain } from 'electron';
 import * as path from 'path';
 import * as url from 'url';
-// THIS IS IMPORTANT FOR TCPCLIENT!
+// THIS LINE IS IMPORTANT FOR PLUGIN!
 import {TCPClient} from "@devioarts/capacitor-tcpclient/electron/tcpclient";
 
 import express from 'express';
 import type { AddressInfo } from 'net';
 
 const isDev = !app.isPackaged;
-// THIS IS IMPORTANT FOR TCPCLIENT!
+// THIS LINE IS IMPORTANT FOR PLUGIN!
 let tcpClient: TCPClient | null = null;
 
 async function startLocalHttp(distDir: string): Promise<number> {
@@ -76,7 +76,7 @@ function createWindow() {
       sandbox: false,
     },
   });
-  // THIS IS IMPORTANT FOR TCPCLIENT!
+  // THIS LINE IS IMPORTANT FOR PLUGIN!
   tcpClient = new TCPClient(win);
 
   if (isDev) {
@@ -101,14 +101,14 @@ app.on('window-all-closed', () => {
 ### electron/preload.cjs
 ```javascript
 const { contextBridge, ipcRenderer } = require("electron");
-// THIS IS IMPORTANT FOR TCPCLIENT!
+// THIS LINE IS IMPORTANT FOR PLUGIN!
 const {createTCPClientAPI} = require("@devioarts/capacitor-tcpclient/electron/tcpclient-bridge.cjs");
 
 window.addEventListener('DOMContentLoaded', () => {
   console.log('Electron preload loaded');
 });
 
-// THIS IS IMPORTANT FOR TCPCLIENT!
+// THIS LINE IS IMPORTANT FOR PLUGIN!
 contextBridge.exposeInMainWorld('TCPClient', createTCPClientAPI({ ipcRenderer }));
 ```
 ---
