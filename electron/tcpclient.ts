@@ -15,15 +15,15 @@ import type { BrowserWindow } from 'electron';
 import { ipcMain } from 'electron';
 import net from 'net';
 
-import type {ExpectInput} from '../src/utils/expect'
+import type { ExpectInput } from '../src/utils/expect';
 import { parseExpectBytes } from '../src/utils/expect';
 
 type ExpectType = ExpectInput;
 
 type Empty = Record<string, never>;
-type StdOk<T extends object = Empty>  = { error: false; errorMessage: null } & T;
-type StdErr<T extends object = Empty> = { error: true;  errorMessage: string } & T;
-type Std<T extends object = Empty>    = StdOk<T> | StdErr<T>;
+type StdOk<T extends object = Empty> = { error: false; errorMessage: null } & T;
+type StdErr<T extends object = Empty> = { error: true; errorMessage: string } & T;
+type Std<T extends object = Empty> = StdOk<T> | StdErr<T>;
 
 function ok(): StdOk<Empty>;
 function ok<T extends object>(extra: T): StdOk<T>;
@@ -33,10 +33,7 @@ function ok<T extends object>(extra?: T) {
 function fail(msg: unknown): StdErr<Empty>;
 function fail<T extends object>(msg: unknown, extra: T): StdErr<T>;
 function fail<T extends object>(msg: unknown, extra?: T) {
-  const m =
-    (msg as any)?.message ??
-    (typeof msg === 'string' ? msg : null) ??
-    String(msg ?? 'Error');
+  const m = (msg as any)?.message ?? (typeof msg === 'string' ? msg : null) ?? String(msg ?? 'Error');
   return { error: true, errorMessage: m, ...(extra ?? ({} as Empty)) };
 }
 
@@ -61,15 +58,15 @@ export class TCPClient {
   constructor(win: BrowserWindow) {
     this.win = win;
 
-    ipcMain.handle('tcpclient:connect',        (_e, args) => this.connect(args));
-    ipcMain.handle('tcpclient:disconnect',     () => this.disconnect());
-    ipcMain.handle('tcpclient:isConnected',    () => this.isConnected());
-    ipcMain.handle('tcpclient:isReading',      () => this.isReading());
-    ipcMain.handle('tcpclient:write',          (_e, args) => this.write(args));
-    ipcMain.handle('tcpclient:startRead',      (_e, args) => this.startRead(args));
-    ipcMain.handle('tcpclient:stopRead',       () => this.stopRead());
+    ipcMain.handle('tcpclient:connect', (_e, args) => this.connect(args));
+    ipcMain.handle('tcpclient:disconnect', () => this.disconnect());
+    ipcMain.handle('tcpclient:isConnected', () => this.isConnected());
+    ipcMain.handle('tcpclient:isReading', () => this.isReading());
+    ipcMain.handle('tcpclient:write', (_e, args) => this.write(args));
+    ipcMain.handle('tcpclient:startRead', (_e, args) => this.startRead(args));
+    ipcMain.handle('tcpclient:stopRead', () => this.stopRead());
     ipcMain.handle('tcpclient:setReadTimeout', (_e, args) => this.setReadTimeout(args));
-    ipcMain.handle('tcpclient:writeAndRead',   (_e, args) => this.writeAndRead(args));
+    ipcMain.handle('tcpclient:writeAndRead', (_e, args) => this.writeAndRead(args));
   }
 
   private sendEvent(name: 'tcpData' | 'tcpDisconnect', payload: any) {
@@ -80,15 +77,25 @@ export class TCPClient {
     return !!s && !s.destroyed && !s.connecting;
   }
   private jsArrToBuf(arr: number[]) {
-    return Buffer.from(arr.map(n => n & 0xff));
+    return Buffer.from(arr.map((n) => n & 0xff));
   }
 
-  private notifyDisconnectManual() { this.sendEvent('tcpDisconnect', { reason: 'manual', disconnected: true }); }
-  private notifyDisconnectRemote() { this.sendEvent('tcpDisconnect', { reason: 'remote', disconnected: true }); }
-  private notifyDisconnectError(err: string) { this.sendEvent('tcpDisconnect', { reason: 'error', error: err, disconnected: true }); }
+  private notifyDisconnectManual() {
+    this.sendEvent('tcpDisconnect', { reason: 'manual', disconnected: true });
+  }
+  private notifyDisconnectRemote() {
+    this.sendEvent('tcpDisconnect', { reason: 'remote', disconnected: true });
+  }
+  private notifyDisconnectError(err: string) {
+    this.sendEvent('tcpDisconnect', { reason: 'error', error: err, disconnected: true });
+  }
 
   async connect(args: {
-    host: string; port?: number; timeout?: number; noDelay?: boolean; keepAlive?: boolean;
+    host: string;
+    port?: number;
+    timeout?: number;
+    noDelay?: boolean;
+    keepAlive?: boolean;
   }): Promise<Std<{ connected: boolean }>> {
     const host = args.host;
     const port = args.port ?? 9100;
@@ -103,29 +110,45 @@ export class TCPClient {
         const s = new net.Socket();
         this.sock = s;
 
-        let connectTimer: NodeJS.Timeout | null = setTimeout(() => {
-          connectTimer = null;
-          try { s.destroy(new Error('connect timeout')); } catch { /* ignore */}
-          if (this.sock === s) this.sock = null;
-          resolve(fail('connect timeout', { connected: false }));
-        }, Math.max(1, timeout));
+        let connectTimer: NodeJS.Timeout | null = setTimeout(
+          () => {
+            connectTimer = null;
+            try {
+              s.destroy(new Error('connect timeout'));
+            } catch {
+              /* ignore */
+            }
+            if (this.sock === s) this.sock = null;
+            resolve(fail('connect timeout', { connected: false }));
+          },
+          Math.max(1, timeout),
+        );
 
         s.setNoDelay(!!noDelay);
         s.setKeepAlive(!!keepAlive, 60_000);
 
         const onError = (err: Error) => {
-          if (connectTimer) { clearTimeout(connectTimer); connectTimer = null; }
+          if (connectTimer) {
+            clearTimeout(connectTimer);
+            connectTimer = null;
+          }
           if (this.sock === s) this.sock = null;
           resolve(fail(`connect failed: ${err.message}`, { connected: false }));
         };
         s.once('error', onError);
 
         s.connect({ host, port }, () => {
-          if (connectTimer) { clearTimeout(connectTimer); connectTimer = null; }
+          if (connectTimer) {
+            clearTimeout(connectTimer);
+            connectTimer = null;
+          }
           s.removeListener('error', onError);
 
           this.onClose = (hadErr: boolean) => {
-            if (this.streamDataHandler) { s.off('data', this.streamDataHandler); this.streamDataHandler = undefined; }
+            if (this.streamDataHandler) {
+              s.off('data', this.streamDataHandler);
+              this.streamDataHandler = undefined;
+            }
             this.reading = false;
             if (this.sock === s) this.sock = null;
             if (hadErr) this.notifyDisconnectError('socket closed with error');
@@ -149,8 +172,15 @@ export class TCPClient {
     this.sock = null;
 
     if (s) {
-      if (this.onClose) { s.off('close', this.onClose); this.onClose = undefined; }
-      try { s.destroy(); } catch { /* ignore */}
+      if (this.onClose) {
+        s.off('close', this.onClose);
+        this.onClose = undefined;
+      }
+      try {
+        s.destroy();
+      } catch {
+        /* ignore */
+      }
       this.notifyDisconnectManual();
     }
     return ok({ disconnected: true, reading: false });
@@ -170,7 +200,8 @@ export class TCPClient {
 
     const buf = this.jsArrToBuf(args.data || []);
     return new Promise<Std<{ bytesSent: number }>>((resolve) => {
-      this.sock!.write(buf, (err) => {
+      if (!this.sock) return resolve(fail('not connected', { bytesSent: 0 }));
+      this.sock.write(buf, (err) => {
         if (err) resolve(fail(`write failed: ${err.message}`, { bytesSent: 0 }));
         else resolve(ok({ bytesSent: buf.length }));
       });
@@ -179,20 +210,25 @@ export class TCPClient {
 
   // --- micro-batch helpers ---
   private flushPendingNow() {
-    if (this.flushTimer) { clearTimeout(this.flushTimer); this.flushTimer = null; }
+    if (this.flushTimer) {
+      clearTimeout(this.flushTimer);
+      this.flushTimer = null;
+    }
     if (this.pendingSize > 0) {
       const payload = Buffer.concat(this.pendingChunks, this.pendingSize);
       this.pendingChunks = [];
       this.pendingSize = 0;
       const lim = Math.max(1, this.lastChunkSize || 4096);
       for (let off = 0; off < payload.length; off += lim) {
-          const part = payload.subarray(off, Math.min(off + lim, payload.length));
-          this.sendEvent('tcpData', { data: Array.from(part.values()) });
-        }
+        const part = payload.subarray(off, Math.min(off + lim, payload.length));
+        this.sendEvent('tcpData', { data: Array.from(part.values()) });
+      }
     }
   }
   private scheduleFlush() {
-    if (this.flushTimer) { clearTimeout(this.flushTimer); }
+    if (this.flushTimer) {
+      clearTimeout(this.flushTimer);
+    }
     this.flushTimer = setTimeout(() => {
       this.flushTimer = null;
       this.flushPendingNow();
@@ -210,7 +246,10 @@ export class TCPClient {
     // reset batch state
     this.pendingChunks = [];
     this.pendingSize = 0;
-    if (this.flushTimer) { clearTimeout(this.flushTimer); this.flushTimer = null; }
+    if (this.flushTimer) {
+      clearTimeout(this.flushTimer);
+      this.flushTimer = null;
+    }
 
     this.streamDataHandler = (chunk: Buffer) => {
       // iOS-like micro-batch: buffer + debounce 10ms, flush if >16KB
@@ -262,6 +301,7 @@ export class TCPClient {
     const expectUA = parseExpectBytes(args.expect);
     const expectBuf = expectUA ? Buffer.from(expectUA) : null;
 
+    // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
     const s = this.sock!;
     const wasReading = this.reading;
     const shouldSuspend = !!(args.suspendStreamDuringRR ?? true) && wasReading;
@@ -274,7 +314,9 @@ export class TCPClient {
     const bytesSent = reqBuf.length;
     let matched = false;
 
-    return new Promise<Std<{ data: number[]; bytesSent: number | null; bytesReceived: number | null; matched:boolean }>>((resolve) => {
+    return new Promise<
+      Std<{ data: number[]; bytesSent: number | null; bytesReceived: number | null; matched: boolean }>
+    >((resolve) => {
       let timer: NodeJS.Timeout | null = null;
       let idleTimer: NodeJS.Timeout | null = null;
 
@@ -286,10 +328,11 @@ export class TCPClient {
       const interArr: number[] = []; // ms, keep last 5
       const currentIdleMs = () => {
         if (interArr.length === 0) return 50;
-        const sorted = [...interArr].sort((a,b)=>a-b);
-        const med = (sorted.length % 2)
-          ? sorted[(sorted.length/2)|0]
-          : 0.5 * (sorted[sorted.length/2 - 1] + sorted[sorted.length/2]);
+        const sorted = [...interArr].sort((a, b) => a - b);
+        const med =
+          sorted.length % 2
+            ? sorted[(sorted.length / 2) | 0]
+            : 0.5 * (sorted[sorted.length / 2 - 1] + sorted[sorted.length / 2]);
         const thr = Math.round(med * 1.75);
         return Math.max(50, Math.min(200, thr));
       };
@@ -299,8 +342,14 @@ export class TCPClient {
       };
 
       const finish = (out: Buffer | null, err?: string) => {
-        if (timer) { clearTimeout(timer); timer = null; }
-        if (idleTimer) { clearTimeout(idleTimer); idleTimer = null; }
+        if (timer) {
+          clearTimeout(timer);
+          timer = null;
+        }
+        if (idleTimer) {
+          clearTimeout(idleTimer);
+          idleTimer = null;
+        }
         s.off('data', onData);
         s.off('error', onError);
         s.off('close', onClose);
@@ -334,14 +383,26 @@ export class TCPClient {
 
         if (expectBuf) {
           const idx = current.indexOf(expectBuf);
-          if (idx >= 0) { matched = true; finish(current); return; }
-          if (current.length >= cap) { matched = false; finish(current); return; }
+          if (idx >= 0) {
+            matched = true;
+            finish(current);
+            return;
+          }
+          if (current.length >= cap) {
+            matched = false;
+            finish(current);
+            return;
+          }
           // keep waiting for more
           return;
         }
 
         // bez expect: adaptivní until-idle
-        if (current.length >= cap) { matched = false; finish(current); return; }
+        if (current.length >= cap) {
+          matched = false;
+          finish(current);
+          return;
+        }
         armIdle();
       };
 
@@ -349,9 +410,13 @@ export class TCPClient {
       const onClose = () => finish(null, 'connection closed');
 
       timer = setTimeout(() => {
-        const out = (size > 0) ? Buffer.concat(chunks, Math.min(size, cap)) : null;
-        if (out) { matched = false; finish(out); }
-        else { finish(null, 'connect timeout'); }
+        const out = size > 0 ? Buffer.concat(chunks, Math.min(size, cap)) : null;
+        if (out) {
+          matched = false;
+          finish(out);
+        } else {
+          finish(null, 'connect timeout');
+        }
       }, timeout);
 
       s.on('data', onData);

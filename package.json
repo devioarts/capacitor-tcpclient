@@ -1,7 +1,17 @@
 {
   "name": "@devioarts/capacitor-tcpclient",
   "version": "0.0.3",
-  "description": "TCP Client for CapacitorJS working on Android, iOS and Electron",
+  "description": "TCP Client for Capacitor working on Android, iOS and Electron",
+  "keywords": [
+    "capacitor",
+    "android",
+    "ios",
+    "electron",
+    "plugin",
+    "native",
+    "tcp client",
+    "tcp-client"
+  ],
   "main": "dist/plugin.cjs.js",
   "module": "dist/esm/index.js",
   "types": "dist/esm/index.d.ts",
@@ -25,12 +35,6 @@
   "bugs": {
     "url": "https://github.com/devioarts/capacitor-tcpclient/issues"
   },
-  "keywords": [
-    "capacitor",
-    "plugin",
-    "native",
-    "tcp client"
-  ],
   "scripts": {
     "verify": "npm run verify:ios && npm run verify:android && npm run verify:web",
     "verify:ios": "xcodebuild -scheme DevioartsCapacitorTcpclient -destination generic/platform=iOS",

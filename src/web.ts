@@ -8,15 +8,14 @@ import type {
   TcpWriteOptions,
   TcpWriteAndReadOptions,
   TcpStartReadOptions,
-
   TcpConnectResult,
   TcpWriteResult,
   TcpWriteAndReadResult,
   TcpStartStopResult,
   TcpIsConnectedResult,
   TcpDisconnectResult,
-  TcpIsReadingResult} from './definitions';
-
+  TcpIsReadingResult,
+} from './definitions';
 
 /**
  * Contract the Electron preload exposes as `window.TCPClient`.
@@ -52,8 +51,9 @@ function ok<T extends Record<string, unknown>>(extra: T = {} as T): BaseResult &
   return { error: false, errorMessage: null, ...extra };
 }
 
-function log(...a: any[]) { console.debug('[TCPClient]', ...a); }
-
+function log(...a: any[]) {
+  console.debug('[TCPClient]', ...a);
+}
 
 /**
  * Capacitor Web implementation.
@@ -61,8 +61,6 @@ function log(...a: any[]) { console.debug('[TCPClient]', ...a); }
  * - In browsers, provides a no-op/mock implementation for development and previews.
  */
 export class TCPClientWeb extends WebPlugin implements TCPClientPlugin {
-
-
   /** Open a TCP connection (delegated to Electron or mocked). */
   async connect(args: TcpConnectOptions): Promise<TcpConnectResult> {
     if (electronApi) return electronApi.connect(args);
@@ -74,7 +72,7 @@ export class TCPClientWeb extends WebPlugin implements TCPClientPlugin {
   async disconnect(): Promise<TcpDisconnectResult> {
     if (electronApi) return electronApi.disconnect();
     log('[disconnect]');
-    return ok({ disconnected: true, reading:false });
+    return ok({ disconnected: true, reading: false });
   }
 
   /** Report connection status. */
@@ -139,7 +137,7 @@ export class TCPClientWeb extends WebPlugin implements TCPClientPlugin {
 
     if (electronApi) {
       return electronApi.writeAndRead({
-        data ,
+        data,
         timeout: args.timeout ?? 1000,
         maxBytes: args.maxBytes ?? 4096,
         expect: args.expect as any,
@@ -155,7 +153,7 @@ export class TCPClientWeb extends WebPlugin implements TCPClientPlugin {
       bytesReceived: 0,
 
       data: [],
-      matched: false
+      matched: false,
     });
   }
 

@@ -18,10 +18,7 @@ declare global {
    * Tip: Extra fields for each call are carried via a generic type parameter.
    */
 
-  type TCPStd<T extends object = Record<string, unknown>> =
-    { error: boolean; errorMessage: string | null } & T;
-
-
+  type TCPStd<T extends object = Record<string, unknown>> = { error: boolean; errorMessage: string | null } & T;
 
   /**
    * Preload-injected API surface.
@@ -91,10 +88,7 @@ declare global {
        * - 'tcpData': { data:number[] }
        * - 'tcpDisconnect': { disconnected:true, reason:'manual'|'remote'|'error', error? }
        */
-      addListener(
-        event: 'tcpData' | 'tcpDisconnect',
-        cb: (payload: unknown) => void
-      ): { remove: () => void };
+      addListener(event: 'tcpData' | 'tcpDisconnect', cb: (payload: unknown) => void): { remove: () => void };
 
       /** Remove all event listeners registered via this bridge. */
       removeAllListeners(): Promise<void>;

@@ -96,9 +96,6 @@ contextBridge.exposeInMainWorld('TCPClient', createTCPClientAPI({ ipcRenderer })
 <docgen-api>
 <!--Update the source file JSDoc comments and rerun docgen to update the docs below-->
 
-The Capacitor plugin contract. All methods resolve; errors are returned in the
-payload (error=true, errorMessage=string) rather than throwing.
-
 ### connect(...)
 
 ```typescript

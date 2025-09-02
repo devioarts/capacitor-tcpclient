@@ -54,11 +54,11 @@ export interface TcpConnectOptions {
   /** Hostname or IP address to connect to. Required. */
   host: string;
   /** TCP port, defaults to 9100. Valid range 1..65535 (validated on Android). */
-  port?: number;       // default 9100
+  port?: number; // default 9100
   /** Connect timeout in milliseconds, defaults to 3000. */
-  timeout?: number;    // ms, default 3000
+  timeout?: number; // ms, default 3000
   /** Enable TCP_NODELAY (Nagle off). Defaults to true. */
-  noDelay?: boolean;   // TCP_NODELAY (default true)
+  noDelay?: boolean; // TCP_NODELAY (default true)
   /** Enable SO_KEEPALIVE. Defaults to true. */
   keepAlive?: boolean; // SO_KEEPALIVE (default true)
 }
@@ -122,7 +122,7 @@ export interface TcpIsReadingResult {
  */
 export interface TcpStartReadOptions {
   /** Maximum bytes per emitted tcpData event. Default 4096. */
-  chunkSize?: number;   // default 4096
+  chunkSize?: number; // default 4096
   /** Stream read timeout (ms). Android: applies SO_TIMEOUT; iOS: no-op. */
   readTimeout?: number; // ms; Android applies SO_TIMEOUT; iOS: no-op
 }
@@ -183,9 +183,9 @@ export interface TcpWriteAndReadOptions {
   /** Request payload to send. */
   data: number[] | Uint8Array;
   /** Absolute RR timeout in ms. Defaults to 1000. */
-  timeout?: number;                 // ms, default 1000
+  timeout?: number; // ms, default 1000
   /** Maximum number of bytes to accumulate and return. Defaults to 4096. */
-  maxBytes?: number;                // default 4096
+  maxBytes?: number; // default 4096
   /**
    * Optional expected pattern. When provided, reading stops as soon as the
    * accumulated buffer contains this pattern. Accepts:
@@ -198,7 +198,7 @@ export interface TcpWriteAndReadOptions {
    * the stream. Defaults to true (Android default true; iOS behaves as if true;
    * Electron defaults to true as well).
    */
-  suspendStreamDuringRR?: boolean;  // default true on Android; iOS behaves as if true
+  suspendStreamDuringRR?: boolean; // default true on Android; iOS behaves as if true
 }
 
 /**
@@ -215,7 +215,7 @@ export interface TcpWriteAndReadResult {
   bytesSent: number;
   bytesReceived: number;
   /** Received bytes (may be partial if timeout after some data). */
-  data: number[];                   // received bytes
+  data: number[]; // received bytes
   /** True if the expect pattern was matched; false otherwise. */
   matched: boolean;
 }
@@ -248,10 +248,6 @@ export interface TcpDisconnectEvent {
 
 /* ====== Plugin surface ====== */
 
-/**
- * The Capacitor plugin contract. All methods resolve; errors are returned in the
- * payload (error=true, errorMessage=string) rather than throwing.
- */
 export interface TCPClientPlugin {
   /** Open a TCP connection. */
   connect(options: TcpConnectOptions): Promise<TcpConnectResult>;
@@ -283,15 +279,12 @@ export interface TCPClientPlugin {
   }>;
 
   /** Subscribe to micro-batched stream data events. */
-  addListener(
-    eventName: 'tcpData',
-    listenerFunc: (event: TcpDataEvent) => void
-  ): Promise<PluginListenerHandle>;
+  addListener(eventName: 'tcpData', listenerFunc: (event: TcpDataEvent) => void): Promise<PluginListenerHandle>;
 
   /** Subscribe to disconnect notifications. */
   addListener(
     eventName: 'tcpDisconnect',
-    listenerFunc: (event: TcpDisconnectEvent) => void
+    listenerFunc: (event: TcpDisconnectEvent) => void,
   ): Promise<PluginListenerHandle>;
 
   /** Remove all tcpData/tcpDisconnect listeners. */

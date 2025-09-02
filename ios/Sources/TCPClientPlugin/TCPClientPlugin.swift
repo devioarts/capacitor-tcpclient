@@ -14,7 +14,7 @@ public class TCPClientPlugin: CAPPlugin, CAPBridgedPlugin, TcpClientDelegate {
         CAPPluginMethod(name: "startRead", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "stopRead", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "setReadTimeout", returnType: CAPPluginReturnPromise),
-        CAPPluginMethod(name: "writeAndRead", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "writeAndRead", returnType: CAPPluginReturnPromise)
     ]
 
     private let client = TCPClient()
@@ -25,7 +25,7 @@ public class TCPClientPlugin: CAPPlugin, CAPBridgedPlugin, TcpClientDelegate {
     private var pendingBuffer = [UInt8]()
     private var flushWorkItem: DispatchWorkItem?
 
-    public override func load() { client.delegate = self }
+    override public func load() { client.delegate = self }
 
     // MARK: - API
 
@@ -63,7 +63,7 @@ public class TCPClientPlugin: CAPPlugin, CAPBridgedPlugin, TcpClientDelegate {
     }
 
     @objc func write(_ call: CAPPluginCall) {
-        var bytes: [UInt8]? = nil
+        var bytes: [UInt8]?
         if let arr = call.getArray("data", UInt.self) {
             bytes = arr.map { UInt8($0 & 0xff) }
         } else if let obj = call.getObject("data") {
@@ -110,7 +110,7 @@ public class TCPClientPlugin: CAPPlugin, CAPBridgedPlugin, TcpClientDelegate {
     }
 
     @objc func writeAndRead(_ call: CAPPluginCall) {
-        var bytes: [UInt8]? = nil
+        var bytes: [UInt8]?
         if let arr = call.getArray("data", UInt.self) {
             bytes = arr.map { UInt8($0 & 0xff) }
         } else if let obj = call.getObject("data") {
@@ -132,7 +132,7 @@ public class TCPClientPlugin: CAPPlugin, CAPBridgedPlugin, TcpClientDelegate {
         let maxBytes = call.getInt("maxBytes") ?? 4096
         let suspendRR = call.getBool("suspendStreamDuringRR") ?? true
 
-        var matcher: ((Data) -> Bool)? = nil
+        var matcher: ((Data) -> Bool)?
         if let s = call.getString("expect"), !s.isEmpty {
             let clean = s.lowercased().replacingOccurrences(of: "0x", with: "").replacingOccurrences(of: " ", with: "")
             guard !clean.isEmpty, clean.count % 2 == 0 else {
@@ -202,7 +202,7 @@ public class TCPClientPlugin: CAPPlugin, CAPBridgedPlugin, TcpClientDelegate {
         }
     }
 
-    public override func checkPermissions(_ call: CAPPluginCall) { call.resolve() }
+    override public func checkPermissions(_ call: CAPPluginCall) { call.resolve() }
 
     // MARK: - Helpers
 
