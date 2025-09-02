@@ -50,7 +50,7 @@
     "clean": "rimraf ./dist",
     "watch": "tsc --watch",
     "prepublishOnly": "npm run build",
-    "publish": "npm publish --access public"
+    "publish-public": "npm publish --access public"
   },
   "devDependencies": {
     "@capacitor/android": "^7.0.0",
