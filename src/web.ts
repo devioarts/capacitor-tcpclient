@@ -8,7 +8,7 @@ import type {
   TcpWriteOptions,
   TcpWriteAndReadOptions,
   TcpStartReadOptions,
-  BaseResult,
+
   TcpConnectResult,
   TcpWriteResult,
   TcpWriteAndReadResult,
@@ -30,7 +30,10 @@ type ElectronTCPClient = {
   write(a: TcpWriteOptions): Promise<TcpWriteResult>;
   startRead(a?: TcpStartReadOptions): Promise<TcpStartStopResult>;
   stopRead(): Promise<TcpStartStopResult>;
-  setReadTimeout(a: { ms: number }): Promise<BaseResult>;
+  setReadTimeout(a: { readTimeout: number }): Promise<{
+    error: boolean;
+    errorMessage?: string | null;
+  }>;
   writeAndRead(a: Required<TcpWriteAndReadOptions>): Promise<TcpWriteAndReadResult>;
 
   addListener(event: 'tcpData' | 'tcpDisconnect', cb: (payload: any) => void): { remove(): void };
@@ -42,6 +45,8 @@ type ElectronTCPClient = {
  * Fallback to UA/versions checks for robustness in dev and tests.
  */
 const electronApi = (globalThis as any).TCPClient as ElectronTCPClient | undefined;
+
+type BaseResult = { error: boolean; errorMessage?: string | null };
 
 function ok<T extends Record<string, unknown>>(extra: T = {} as T): BaseResult & T {
   return { error: false, errorMessage: null, ...extra };
@@ -69,7 +74,7 @@ export class TCPClientWeb extends WebPlugin implements TCPClientPlugin {
   async disconnect(): Promise<TcpDisconnectResult> {
     if (electronApi) return electronApi.disconnect();
     log('[disconnect]');
-    return ok({ disconnected: true });
+    return ok({ disconnected: true, reading:false });
   }
 
   /** Report connection status. */
@@ -91,7 +96,7 @@ export class TCPClientWeb extends WebPlugin implements TCPClientPlugin {
     const data = Array.from(args.data as any) as number[];
     if (electronApi) return electronApi.write({ data });
     log('write', args);
-    return ok({ bytesWritten: data.length });
+    return ok({ bytesSent: data.length });
   }
 
   /**
@@ -117,7 +122,7 @@ export class TCPClientWeb extends WebPlugin implements TCPClientPlugin {
    * - Electron: forwards to preload (native-level timeout semantics).
    * - Web: stores the value for mock timing only.
    */
-  async setReadTimeout(args: { ms: number }): Promise<BaseResult> {
+  async setReadTimeout(args: { readTimeout: number }): Promise<BaseResult> {
     if (electronApi) return electronApi.setReadTimeout(args);
     log('setReadTimeout', args);
     return ok();
@@ -135,7 +140,7 @@ export class TCPClientWeb extends WebPlugin implements TCPClientPlugin {
     if (electronApi) {
       return electronApi.writeAndRead({
         data ,
-        timeoutMs: args.timeoutMs ?? 1000,
+        timeout: args.timeout ?? 1000,
         maxBytes: args.maxBytes ?? 4096,
         expect: args.expect as any,
         suspendStreamDuringRR: suspend,
@@ -146,9 +151,11 @@ export class TCPClientWeb extends WebPlugin implements TCPClientPlugin {
     log('writeAndRead', args);
 
     return ok({
-      bytesWritten: data.length,
-      bytesRead: 0,
+      bytesSent: data.length,
+      bytesReceived: 0,
+
       data: [],
+      matched: false
     });
   }
 

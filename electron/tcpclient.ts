@@ -1,4 +1,15 @@
-// electron/main/tcpclient.ts
+/*
+ * Electron main-process TCP client bridge.
+ *
+ * Responsibilities:
+ * - Manage a single net.Socket lifecycle (connect/disconnect) with TCP_NODELAY and KEEPALIVE.
+ * - Provide a strict request/response API with timeout, optional pattern match, and byte cap.
+ * - Stream reader: micro-batch incoming data (10ms window, 16KB cap) to minimize IPC overhead,
+ *   then split into consumer-sized slices (<= lastChunkSize) before emitting tcpData to renderer.
+ * - IPC contract: handle `ipcMain.handle('tcpclient:*')` requests and emit `tcpclient:event:*`
+ *   notifications to the renderer.
+ * - Error policy: methods resolve with { error, errorMessage, ... } payloads; no exceptions cross IPC.
+ */
 
 import type { BrowserWindow } from 'electron';
 import { ipcMain } from 'electron';
@@ -7,7 +18,6 @@ import net from 'net';
 import type {ExpectInput} from '../src/utils/expect'
 import { parseExpectBytes } from '../src/utils/expect';
 
-
 type ExpectType = ExpectInput;
 
 type Empty = Record<string, never>;
@@ -15,7 +25,6 @@ type StdOk<T extends object = Empty>  = { error: false; errorMessage: null } & T
 type StdErr<T extends object = Empty> = { error: true;  errorMessage: string } & T;
 type Std<T extends object = Empty>    = StdOk<T> | StdErr<T>;
 
-// Standardized ok/fail helpers with overloads (preserve precise typings without `{}` widening).
 function ok(): StdOk<Empty>;
 function ok<T extends object>(extra: T): StdOk<T>;
 function ok<T extends object>(extra?: T) {
@@ -33,19 +42,25 @@ function fail<T extends object>(msg: unknown, extra?: T) {
 
 export class TCPClient {
   private win: BrowserWindow;
-  private sock: net.Socket | null = null;         // active socket, if any
-  private reading = false;                         // stream-reading state for renderer parity
-  private rrInFlight = false;                      // exclude concurrent request/response cycles
-  private streamDataHandler?: (chunk: Buffer) => void; // current 'data' listener used for streaming
-  private onClose?: (hadErr: boolean) => void;     // 'close' handler reference (to unregister on manual disconnect)
+  private sock: net.Socket | null = null;
+  private reading = false;
+  private rrInFlight = false;
+  private streamDataHandler?: (chunk: Buffer) => void;
+  private onClose?: (hadErr: boolean) => void;
 
-  private lastChunkSize = 4096;                    // remembers requested chunk size to partition large frames
-  private readTimeoutMs = 1000;                    // logical RR timeout (Node sockets are evented; we emulate via timer)
+  private lastChunkSize = 4096;
+  private readTimeout = 1000;
+
+  // iOS-like micro-batching
+  private readonly mergeWindowMs = 10;
+  private readonly mergeMaxBytes = 16 * 1024;
+  private pendingChunks: Buffer[] = [];
+  private pendingSize = 0;
+  private flushTimer: NodeJS.Timeout | null = null;
 
   constructor(win: BrowserWindow) {
     this.win = win;
 
-    // Register IPC handlers (main process). The preload/renderer will invoke these via ipcRenderer.invoke.
     ipcMain.handle('tcpclient:connect',        (_e, args) => this.connect(args));
     ipcMain.handle('tcpclient:disconnect',     () => this.disconnect());
     ipcMain.handle('tcpclient:isConnected',    () => this.isConnected());
@@ -57,44 +72,30 @@ export class TCPClient {
     ipcMain.handle('tcpclient:writeAndRead',   (_e, args) => this.writeAndRead(args));
   }
 
-  /** Emit an event to the renderer with a stable name prefix. */
   private sendEvent(name: 'tcpData' | 'tcpDisconnect', payload: any) {
     this.win.webContents.send(`tcpclient:event:${name}`, payload);
   }
-  /** Cheap connection health: socket exists, not destroyed, not still connecting. */
   private isOpen() {
     const s = this.sock;
     return !!s && !s.destroyed && !s.connecting;
   }
-  /** Convert JS number[] (0..255) to a Buffer safely. */
   private jsArrToBuf(arr: number[]) {
     return Buffer.from(arr.map(n => n & 0xff));
   }
 
-  /** Convenience notifiers for disconnect reasons (forwarded to renderer). */
   private notifyDisconnectManual() { this.sendEvent('tcpDisconnect', { reason: 'manual', disconnected: true }); }
   private notifyDisconnectRemote() { this.sendEvent('tcpDisconnect', { reason: 'remote', disconnected: true }); }
-  private notifyDisconnectError(err: string) {
-    this.sendEvent('tcpDisconnect', { reason: 'error', error: err, disconnected: true });
-  }
+  private notifyDisconnectError(err: string) { this.sendEvent('tcpDisconnect', { reason: 'error', error: err, disconnected: true }); }
 
-  /**
-   * Connect to a TCP host.
-   * - Ensures a clean starting state (calls tcpDisconnect()).
-   * - Applies TCP_NODELAY and keep-alive settings.
-   * - Sets up a connection timeout via setTimeout; clears listeners accordingly.
-   * Resolves with a standardized result shape.
-   */
   async connect(args: {
-    host: string; port?: number; timeoutMs?: number; noDelay?: boolean; keepAlive?: boolean;
+    host: string; port?: number; timeout?: number; noDelay?: boolean; keepAlive?: boolean;
   }): Promise<Std<{ connected: boolean }>> {
     const host = args.host;
     const port = args.port ?? 9100;
-    const timeoutMs = args.timeoutMs ?? 3000;
+    const timeout = args.timeout ?? 3000;
     const noDelay = args.noDelay ?? true;
     const keepAlive = args.keepAlive ?? true;
 
-    // ensure clean state (neemituje "manual", pokud žádný socket nebyl)
     await this.disconnect();
 
     return new Promise<Std<{ connected: boolean }>>((resolve) => {
@@ -102,13 +103,12 @@ export class TCPClient {
         const s = new net.Socket();
         this.sock = s;
 
-        // Connection watchdog: if not connected in time, destroy and fail.
         let connectTimer: NodeJS.Timeout | null = setTimeout(() => {
           connectTimer = null;
-          try { s.destroy(new Error('connect timeout')); } catch { /* ignore */ }
+          try { s.destroy(new Error('connect timeout')); } catch { /* ignore */}
           if (this.sock === s) this.sock = null;
           resolve(fail('connect timeout', { connected: false }));
-        }, Math.max(1, timeoutMs));
+        }, Math.max(1, timeout));
 
         s.setNoDelay(!!noDelay);
         s.setKeepAlive(!!keepAlive, 60_000);
@@ -118,15 +118,15 @@ export class TCPClient {
           if (this.sock === s) this.sock = null;
           resolve(fail(`connect failed: ${err.message}`, { connected: false }));
         };
-        // Guard the connect phase with a one-shot error listener.
         s.once('error', onError);
 
         s.connect({ host, port }, () => {
           if (connectTimer) { clearTimeout(connectTimer); connectTimer = null; }
           s.removeListener('error', onError);
 
-          // Register a one-shot close handler and keep a reference to avoid duplicate events on manual destroy().
           this.onClose = (hadErr: boolean) => {
+            if (this.streamDataHandler) { s.off('data', this.streamDataHandler); this.streamDataHandler = undefined; }
+            this.reading = false;
             if (this.sock === s) this.sock = null;
             if (hadErr) this.notifyDisconnectError('socket closed with error');
             else this.notifyDisconnectRemote();
@@ -142,122 +142,122 @@ export class TCPClient {
     });
   }
 
-  /**
-   * Manual disconnect.
-   * - Stops streaming (removes 'data' handler) and resets reading=false.
-   * - Unregisters the 'close' handler before destroy() to avoid duplicate disconnect events.
-   * - Notifies the renderer with a 'manual' disconnect event.
-   */
   async disconnect(): Promise<Std<{ disconnected: boolean; reading?: boolean }>> {
-    await this.stopRead(); // sets this.reading = false
+    await this.stopRead();
 
     const s = this.sock;
     this.sock = null;
 
     if (s) {
-      // Unhook the close listener before destroy so we don't emit a second event.
       if (this.onClose) { s.off('close', this.onClose); this.onClose = undefined; }
-      try { s.destroy(); } catch { /* ignore */ }
+      try { s.destroy(); } catch { /* ignore */}
       this.notifyDisconnectManual();
     }
-
     return ok({ disconnected: true, reading: false });
   }
 
-  /** Quick connection status (main process side). */
   async isConnected(): Promise<Std<{ connected: boolean }>> {
     return ok({ connected: this.isOpen() });
   }
 
-  /** Whether stream reading is currently enabled from the renderer's perspective. */
   async isReading(): Promise<Std<{ reading: boolean }>> {
     return ok({ reading: this.reading });
   }
 
-  /**
-   * Write raw bytes to the socket.
-   * - Fails if no connection or an RR cycle is active.
-   * - Uses Node's write callback to resolve success/failure.
-   */
-  async write(args: { data: number[] }): Promise<Std<{ bytesWritten: number }>> {
-    if (!this.isOpen() || !this.sock) return fail('not connected', { bytesWritten: 0 });
-    if (this.rrInFlight) return fail('busy', { bytesWritten: 0 });
+  async write(args: { data: number[] }): Promise<Std<{ bytesSent: number }>> {
+    if (!this.isOpen() || !this.sock) return fail('not connected', { bytesSent: 0 });
+    if (this.rrInFlight) return fail('busy', { bytesSent: 0 });
 
     const buf = this.jsArrToBuf(args.data || []);
-    return new Promise<Std<{ bytesWritten: number }>>((resolve) => {
+    return new Promise<Std<{ bytesSent: number }>>((resolve) => {
       this.sock!.write(buf, (err) => {
-        if (err) resolve(fail(`write failed: ${err.message}`, { bytesWritten: 0 }));
-        else resolve(ok({ bytesWritten: buf.length }));
+        if (err) resolve(fail(`write failed: ${err.message}`, { bytesSent: 0 }));
+        else resolve(ok({ bytesSent: buf.length }));
       });
     });
   }
 
-  /**
-   * Start streaming read.
-   * - Attaches a 'data' handler that slices large frames into `lastChunkSize` parts,
-   *   emitting multiple tcpData events to the renderer.
-   * - Idempotent: if already reading, returns reading:true without changing handlers.
-   */
-  async startRead(args: { chunkSize?: number; readTimeoutMs?: number }): Promise<Std<{ reading: boolean }>> {
+  // --- micro-batch helpers ---
+  private flushPendingNow() {
+    if (this.flushTimer) { clearTimeout(this.flushTimer); this.flushTimer = null; }
+    if (this.pendingSize > 0) {
+      const payload = Buffer.concat(this.pendingChunks, this.pendingSize);
+      this.pendingChunks = [];
+      this.pendingSize = 0;
+      const lim = Math.max(1, this.lastChunkSize || 4096);
+      for (let off = 0; off < payload.length; off += lim) {
+          const part = payload.subarray(off, Math.min(off + lim, payload.length));
+          this.sendEvent('tcpData', { data: Array.from(part.values()) });
+        }
+    }
+  }
+  private scheduleFlush() {
+    if (this.flushTimer) { clearTimeout(this.flushTimer); }
+    this.flushTimer = setTimeout(() => {
+      this.flushTimer = null;
+      this.flushPendingNow();
+    }, this.mergeWindowMs);
+  }
+
+  async startRead(args: { chunkSize?: number; readTimeout?: number }): Promise<Std<{ reading: boolean }>> {
     if (!this.isOpen() || !this.sock) return ok({ reading: false });
     if (this.reading) return ok({ reading: true });
+
     this.reading = true;
     this.lastChunkSize = Math.max(1, args?.chunkSize ?? 4096);
-    if (args?.readTimeoutMs != null) this.readTimeoutMs = Math.max(1, args.readTimeoutMs);
+    if (args?.readTimeout != null) this.readTimeout = Math.max(1, args.readTimeout);
 
-    // Respect lastChunkSize: split larger buffers into smaller event-sized pieces.
+    // reset batch state
+    this.pendingChunks = [];
+    this.pendingSize = 0;
+    if (this.flushTimer) { clearTimeout(this.flushTimer); this.flushTimer = null; }
+
     this.streamDataHandler = (chunk: Buffer) => {
-      const lim = this.lastChunkSize;
-      for (let off = 0; off < chunk.length; off += lim) {
-        const part = chunk.subarray(off, Math.min(off + lim, chunk.length));
-        this.sendEvent('tcpData', { data: Array.from(part.values()) });
+      // iOS-like micro-batch: buffer + debounce 10ms, flush if >16KB
+      this.pendingChunks.push(chunk);
+      this.pendingSize += chunk.length;
+      if (this.pendingSize >= this.mergeMaxBytes) {
+        this.flushPendingNow();
+      } else {
+        this.scheduleFlush();
       }
     };
     this.sock.on('data', this.streamDataHandler);
     return ok({ reading: true });
   }
 
-  /** Stop streaming read and remove the current 'data' handler (if any). */
   async stopRead(): Promise<Std<{ reading: boolean }>> {
     if (this.sock && this.streamDataHandler) {
       this.sock.off('data', this.streamDataHandler);
     }
     this.streamDataHandler = undefined;
+    // flush anything buffered
+    this.flushPendingNow();
     this.reading = false;
     return ok({ reading: false });
   }
 
-  /** Store a logical read timeout used by the RR helper. */
-  async setReadTimeout(args: { ms: number }): Promise<Std> {
-    this.readTimeoutMs = Math.max(1, args?.ms ?? 1000);
+  async setReadTimeout(args: { readTimeout: number }): Promise<Std> {
+    this.readTimeout = Math.max(1, args?.readTimeout ?? 1000);
     return ok();
   }
 
-  /**
-   * Request/Response helper:
-   * - Optionally suspends streaming to avoid the stream consumer stealing the response.
-   * - Accumulates chunks until:
-   *   a) `expect` pattern appears, or
-   *   b) `maxBytes` reached, or
-   *   c) timeout fires.
-   * - Ensures cleanup of listeners and internal flags in all paths.
-   */
   async writeAndRead(args: {
     data: number[];
-    timeoutMs?: number;
+    timeout?: number;
     maxBytes?: number;
     expect?: ExpectType;
     suspendStreamDuringRR?: boolean;
-  }): Promise<Std<{ data: number[]; bytesWritten: number | null; bytesRead: number | null }>> {
+  }): Promise<Std<{ data: number[]; bytesSent: number | null; bytesReceived: number | null; matched: boolean }>> {
     if (!this.isOpen() || !this.sock) {
-      return fail('not connected', { data: [], bytesWritten: null, bytesRead: null });
+      return fail('not connected', { data: [], bytesSent: null, bytesReceived: null, matched: false });
     }
     if (this.rrInFlight) {
-      return fail('busy', { data: [], bytesWritten: null, bytesRead: null });
+      return fail('busy', { data: [], bytesSent: null, bytesReceived: null, matched: false });
     }
     this.rrInFlight = true;
 
-    const timeout = Math.max(1, args.timeoutMs ?? this.readTimeoutMs ?? 1000);
+    const timeout = Math.max(1, args.timeout ?? this.readTimeout ?? 1000);
     const cap = Math.max(1, args.maxBytes ?? 4096);
     const expectUA = parseExpectBytes(args.expect);
     const expectBuf = expectUA ? Buffer.from(expectUA) : null;
@@ -266,61 +266,98 @@ export class TCPClient {
     const wasReading = this.reading;
     const shouldSuspend = !!(args.suspendStreamDuringRR ?? true) && wasReading;
 
-    // Temporarily unhook streaming so the RR listener exclusively consumes data.
-    if (shouldSuspend && this.streamDataHandler) {
-      s.off('data', this.streamDataHandler);
+    if (shouldSuspend && this.streamDataHandler && this.isOpen() && this.reading) {
+      s.on('data', this.streamDataHandler);
     }
 
     const reqBuf = this.jsArrToBuf(args.data || []);
-    const bytesWritten = reqBuf.length;
+    const bytesSent = reqBuf.length;
+    let matched = false;
 
-    return new Promise<Std<{ data: number[]; bytesWritten: number | null; bytesRead: number | null }>>((resolve) => {
+    return new Promise<Std<{ data: number[]; bytesSent: number | null; bytesReceived: number | null; matched:boolean }>>((resolve) => {
       let timer: NodeJS.Timeout | null = null;
+      let idleTimer: NodeJS.Timeout | null = null;
+
       const chunks: Buffer[] = [];
+      let size = 0;
+
+      // adaptive until-idle (like iOS)
+      let lastDataAt = 0;
+      const interArr: number[] = []; // ms, keep last 5
+      const currentIdleMs = () => {
+        if (interArr.length === 0) return 50;
+        const sorted = [...interArr].sort((a,b)=>a-b);
+        const med = (sorted.length % 2)
+          ? sorted[(sorted.length/2)|0]
+          : 0.5 * (sorted[sorted.length/2 - 1] + sorted[sorted.length/2]);
+        const thr = Math.round(med * 1.75);
+        return Math.max(50, Math.min(200, thr));
+      };
+      const armIdle = () => {
+        if (idleTimer) clearTimeout(idleTimer);
+        idleTimer = setTimeout(() => finish(Buffer.concat(chunks, Math.min(size, cap))), currentIdleMs());
+      };
 
       const finish = (out: Buffer | null, err?: string) => {
         if (timer) { clearTimeout(timer); timer = null; }
+        if (idleTimer) { clearTimeout(idleTimer); idleTimer = null; }
         s.off('data', onData);
         s.off('error', onError);
         s.off('close', onClose);
-        // Restore streaming if we suspended it.
         if (shouldSuspend && this.streamDataHandler) {
           s.on('data', this.streamDataHandler);
         }
         this.rrInFlight = false;
 
         if (err) {
-          resolve(fail(err, { data: [], bytesWritten, bytesRead: null }));
+          const isTimeout = err === 'connect timeout';
+          resolve(fail(err, { data: [], bytesSent: isTimeout ? bytesSent : 0, bytesReceived: 0, matched: false }));
         } else {
           const resBuf = (out ?? Buffer.alloc(0)).subarray(0, cap);
-          resolve(ok({ data: Array.from(resBuf.values()), bytesWritten, bytesRead: resBuf.length }));
+          resolve(ok({ data: Array.from(resBuf.values()), bytesSent, bytesReceived: resBuf.length, matched }));
         }
       };
 
-      // Accumulate data; if 'expect' is set, search for it; otherwise return first chunk.
       const onData = (chunk: Buffer) => {
         chunks.push(chunk);
-        const current = Buffer.concat(chunks);
-        if (expectBuf) {
-          if (current.indexOf(expectBuf) >= 0 || current.length >= cap) {
-            finish(current);
-          }
-        } else {
-          finish(current);
+        size += chunk.length;
+
+        const now = Date.now();
+        if (lastDataAt > 0) {
+          const d = now - lastDataAt;
+          interArr.push(d);
+          if (interArr.length > 5) interArr.splice(0, interArr.length - 5);
         }
+        lastDataAt = now;
+
+        const current = Buffer.concat(chunks, Math.min(size, cap));
+
+        if (expectBuf) {
+          const idx = current.indexOf(expectBuf);
+          if (idx >= 0) { matched = true; finish(current); return; }
+          if (current.length >= cap) { matched = false; finish(current); return; }
+          // keep waiting for more
+          return;
+        }
+
+        // bez expect: adaptivní until-idle
+        if (current.length >= cap) { matched = false; finish(current); return; }
+        armIdle();
       };
 
       const onError = (err: Error) => finish(null, `writeAndRead failed: ${err.message}`);
       const onClose = () => finish(null, 'connection closed');
 
-      // Emulate read timeout with a single-shot timer.
-      timer = setTimeout(() => finish(null, 'connect timeout'), timeout);
+      timer = setTimeout(() => {
+        const out = (size > 0) ? Buffer.concat(chunks, Math.min(size, cap)) : null;
+        if (out) { matched = false; finish(out); }
+        else { finish(null, 'connect timeout'); }
+      }, timeout);
 
       s.on('data', onData);
       s.once('error', onError);
       s.once('close', onClose);
 
-      // Fire the request; if write fails, bail out and clean up.
       s.write(reqBuf, (err) => {
         if (err) finish(null, `write failed: ${err.message}`);
       });

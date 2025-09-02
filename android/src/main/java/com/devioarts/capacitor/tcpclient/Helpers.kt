@@ -1,6 +1,6 @@
 /**
  * Helpers.kt
- * Small utility functions used by the Android side of the Capacitor TCP client plugin.
+ * Utility functions for the Android side of the Capacitor TCP client plugin.
  */
 package com.devioarts.capacitor.tcpclient
 
@@ -21,10 +21,7 @@ import org.json.JSONObject
  */
 object Helpers {
 
-    /**
-     * Accepts {"0":72, "1":101, ...} (optionally with "length") and builds a ByteArray.
-     * Returns null if indices are missing or non-numeric.
-     */
+    /** Build ByteArray from {"0":72, "1":101, ...} (optionally with "length"). Returns null on invalid shape. */
     fun jsonObjectToBytes(obj: JSONObject): ByteArray? {
         val explicitLen = if (obj.has("length")) obj.optInt("length", -1) else -1
         val len = if (explicitLen >= 0) {
@@ -67,9 +64,9 @@ object Helpers {
         val out = ByteArray(len)
         for (i in 0 until len) {
             try {
-                val v = arr.getInt(i) // may throw if non-numeric
+                val v = arr.getInt(i)
                 out[i] = (v and 0xFF).toByte()
-            } catch (e: Exception) {
+            } catch (_: Exception) {
                 return null
             }
         }
@@ -88,7 +85,7 @@ object Helpers {
                 val v = arr.getInt(i)
                 tmp.add((v and 0xFF).toByte())
             } catch (_: Exception) {
-                // skip invalid entry
+                // skip
             }
         }
         return tmp.toByteArray()
@@ -152,12 +149,18 @@ object Helpers {
      *  - This implementation uses a 256-entry skip table for byte values.
      */
     fun indexOf(haystack: ByteArray, needle: ByteArray): Int {
-        val n = haystack.size
+        return indexOfRange(haystack, haystack.size, needle)
+    }
+
+    /**
+     * Boyer–Moore–Horspool search limited to [length] bytes of [haystack].
+     * Returns start index or -1.
+     */
+    fun indexOfRange(haystack: ByteArray, length: Int, needle: ByteArray): Int {
+        val n = length
         val m = needle.size
         if (m == 0 || m > n) return -1
 
-        // Build bad-character skip table for all 256 possible byte values.
-        // Default shift is the needle length; last character keeps default.
         val skip = IntArray(256) { m }
         for (i in 0 until m - 1) {
             skip[needle[i].toInt() and 0xFF] = m - 1 - i
@@ -166,11 +169,8 @@ object Helpers {
         var i = 0
         while (i <= n - m) {
             var j = m - 1
-            // Compare from the end of the pattern backwards.
             while (j >= 0 && haystack[i + j] == needle[j]) j--
-            if (j < 0) return i // full match
-
-            // Advance by the skip value based on the mismatching byte in haystack
+            if (j < 0) return i
             i += skip[haystack[i + m - 1].toInt() and 0xFF]
         }
         return -1

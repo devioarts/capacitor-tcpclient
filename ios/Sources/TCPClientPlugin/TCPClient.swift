@@ -1,27 +1,17 @@
 import Foundation
 import Darwin
 
-/// Lightweight delegate used by the POSIX-based TCP client to stream bytes
-/// and notify the host (plugin) about disconnect reasons.
 protocol TcpClientDelegate: AnyObject {
     func tcpClient(_ client: TCPClient, didReceive data: Data)
     func tcpClientDidDisconnect(_ client: TCPClient, reason: TCPClient.DisconnectReason)
 }
 
 /// POSIX-based TCP client for iOS/macOS.
-///
-/// Design goals:
-/// - Zero external deps (uses Darwin sockets, poll, fcntl, etc.).
-/// - Thread-safe via a dedicated serial queue for all socket operations.
-/// - Optional streaming read using `DispatchSourceRead`.
-/// - Simple request/response helper (`writeAndRead`) with timeout and optional pattern match.
-///
-/// Notes:
-/// - We set `SO_NOSIGPIPE` to avoid process-killing SIGPIPE on `send`.
-/// - The socket is non-blocking; connect timeout is implemented using `poll(POLLOUT) + SO_ERROR`.
-/// - Read source runs on the same serial queue to avoid cross-thread races.
+/// - Non-blocking socket, connect timeout via poll+SO_ERROR
+/// - Streaming via DispatchSourceRead
+/// - Request/Response with timeout, optional pattern match,
+///   automatic "until idle" (adaptive), and optional stream suspension
 final class TCPClient {
-    /// Error surface kept intentionally small and transport-oriented.
     enum TcpError: Error {
         case notConnected
         case connectTimeout
@@ -31,54 +21,42 @@ final class TCPClient {
         case busy
     }
 
-    /// Why the connection ended.
     enum DisconnectReason {
         case manual
         case error(Error)
         case remote
     }
 
-    // MARK: - Socket state (POSIX)
+    struct ReadResult {
+        let data: Data
+        let matched: Bool
+    }
+
     private var fd: Int32 = -1
     private var readSource: DispatchSourceRead?
-    /// Single-serial queue: guarantees ordering and eliminates most locking.
-    private let queue = DispatchQueue(label: "dioarts.tcpclient", qos: .userInitiated)
+    private let queue = DispatchQueue(label: "devioarts.tcpclient", qos: .userInitiated)
 
-    /// Streaming-read flag (mirrors whether `readSource` is active).
     private var reading = false
-    /// Simple exclusion for `writeAndRead` to avoid concurrent RR operations.
     private var rrInFlight = false
+    private var lastChunkSize: Int = 4096
 
     weak var delegate: TcpClientDelegate?
 
-    /// Ensure resources are freed on GC/teardown.
     deinit { disconnectInternal(reason: .manual) }
 
     // MARK: - Connect/Disconnect
 
-    /// Open a TCP connection. This resolves the host (IPv4/IPv6), configures the socket,
-    /// switches it to non-blocking mode, and performs a connect with a deadline using `poll`.
-    ///
-    /// - Parameters:
-    ///   - host: hostname or IPv4/IPv6 literal
-    ///   - port: TCP port (default 9100 is common for printers)
-    ///   - timeoutMs: connect timeout
-    ///   - noDelay: set TCP_NODELAY to minimize Nagle delays
-    ///   - keepAlive: enable SO_KEEPALIVE
-    ///   - completion: async result on the client queue
     func connect(host: String,
                  port: UInt16 = 9100,
-                 timeoutMs: Int = 3000,
+                 timeout: Int = 3000,
                  noDelay: Bool = true,
                  keepAlive: Bool = true,
                  completion: @escaping (Result<Void, Error>) -> Void) {
         queue.async {
-            // Drop previous state if any; emits delegate disconnect if we had a socket.
             self.disconnectInternal(reason: .manual)
 
-            // Resolve host (first try numeric to skip DNS, then fallback to DNS).
             var hints = addrinfo(
-                ai_flags: AI_NUMERICHOST,  // try literal IP first
+                ai_flags: AI_NUMERICHOST,
                 ai_family: AF_UNSPEC,
                 ai_socktype: SOCK_STREAM,
                 ai_protocol: IPPROTO_TCP,
@@ -87,7 +65,7 @@ final class TCPClient {
             var res: UnsafeMutablePointer<addrinfo>?
             let hostC = host.cString(using: .utf8)!
             if getaddrinfo(hostC, nil, &hints, &res) != 0 {
-                hints.ai_flags = 0 // DNS fallback
+                hints.ai_flags = 0
                 if getaddrinfo(hostC, nil, &hints, &res) != 0 {
                     completion(.failure(TcpError.invalidPort))
                     return
@@ -95,97 +73,79 @@ final class TCPClient {
             }
             defer { if res != nil { freeaddrinfo(res) } }
 
-            // Deadline for the entire connect attempt across all candidate addresses.
-            let deadline = Date().addingTimeInterval(Double(max(1, timeoutMs)) / 1000.0)
+            let deadline = Date().addingTimeInterval(Double(max(1, timeout)) / 1000.0)
             var lastErr: Int32 = 0
             var connected = false
 
-            // Iterate address list until a connect succeeds.
             var ai = res
             while ai != nil, !connected {
                 guard let aiP = ai?.pointee else { break }
                 let s = socket(aiP.ai_family, aiP.ai_socktype, aiP.ai_protocol)
                 if s < 0 { lastErr = errno; ai = aiP.ai_next; continue }
 
-                // Socket options: TCP_NODELAY / KEEPALIVE / NO SIGPIPE
                 var yes: Int32 = 1
                 if noDelay { _ = setsockopt(s, IPPROTO_TCP, TCP_NODELAY, &yes, socklen_t(MemoryLayout.size(ofValue: yes))) }
                 if keepAlive { _ = setsockopt(s, SOL_SOCKET, SO_KEEPALIVE, &yes, socklen_t(MemoryLayout.size(ofValue: yes))) }
-                _ = setsockopt(s, SOL_SOCKET, SO_NOSIGPIPE, &yes, socklen_t(MemoryLayout.size(ofValue: yes))) // critical to avoid SIGPIPE on send
+                _ = setsockopt(s, SOL_SOCKET, SO_NOSIGPIPE, &yes, socklen_t(MemoryLayout.size(ofValue: yes)))
 
-                // Non-blocking connect
                 let flags = fcntl(s, F_GETFL, 0)
                 _ = fcntl(s, F_SETFL, flags | O_NONBLOCK)
 
-                // Build sockaddr with the target port (both v4 and v6).
                 var sa = sockaddr_storage()
-                if let src = aiP.ai_addr {
-                    memcpy(&sa, src, Int(aiP.ai_addrlen))
-                }
+                if let src = aiP.ai_addr { memcpy(&sa, src, Int(aiP.ai_addrlen)) }
                 var saLen: socklen_t = 0
 
                 switch Int32(sa.ss_family) {
                 case AF_INET:
-                    var sin = withUnsafePointer(to: &sa) {
-                        $0.withMemoryRebound(to: sockaddr_in.self, capacity: 1) { $0.pointee }
-                    }
+                    var sin = withUnsafePointer(to: &sa) { $0.withMemoryRebound(to: sockaddr_in.self, capacity: 1) { $0.pointee } }
                     sin.sin_port = CFSwapInt16HostToBig(port)
-                    _ = withUnsafePointer(to: &sin) {
-                        $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-                            memcpy(&sa, $0, MemoryLayout<sockaddr_in>.size)
-                        }
+                    _ = withUnsafePointer(to: &sin) { p in
+                        p.withMemoryRebound(to: sockaddr.self, capacity: 1) { memcpy(&sa, $0, MemoryLayout<sockaddr_in>.size) }
                     }
                     saLen = socklen_t(MemoryLayout<sockaddr_in>.size)
                 case AF_INET6:
-                    var sin6 = withUnsafePointer(to: &sa) {
-                        $0.withMemoryRebound(to: sockaddr_in6.self, capacity: 1) { $0.pointee }
-                    }
+                    var sin6 = withUnsafePointer(to: &sa) { $0.withMemoryRebound(to: sockaddr_in6.self, capacity: 1) { $0.pointee } }
                     sin6.sin6_port = CFSwapInt16HostToBig(port)
-                    _ = withUnsafePointer(to: &sin6) {
-                        $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-                            memcpy(&sa, $0, MemoryLayout<sockaddr_in6>.size)
-                        }
+                    _ = withUnsafePointer(to: &sin6) { p in
+                        p.withMemoryRebound(to: sockaddr.self, capacity: 1) { memcpy(&sa, $0, MemoryLayout<sockaddr_in6>.size) }
                     }
                     saLen = socklen_t(MemoryLayout<sockaddr_in6>.size)
                 default:
                     saLen = socklen_t(aiP.ai_addrlen)
                 }
 
-                // Kick off the non-blocking connect.
                 let rc: Int32 = withUnsafePointer(to: &sa) {
-                    $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-                        Darwin.connect(s, $0, saLen)
-                    }
+                    $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { Darwin.connect(s, $0, saLen) }
                 }
 
                 var ok = false
                 if rc == 0 {
-                    // Immediate connect (local targets or cached ARP/ND can do this).
                     ok = true
                 } else if errno == EINPROGRESS {
-                    // Wait for connect completion or failure.
                     var pfd = pollfd(fd: s, events: Int16(POLLOUT), revents: 0)
-                    let now = Date()
-                    let remainMs = max(1, Int(deadline.timeIntervalSince(now) * 1000))
-                    let prc = withUnsafeMutablePointer(to: &pfd) { poll($0, 1, Int32(remainMs)) }
-                    if prc > 0 {
-                        var soErr: Int32 = 0
-                        var slen = socklen_t(MemoryLayout.size(ofValue: soErr))
-                        // On POLLOUT, check SO_ERROR for the final status.
-                        if getsockopt(s, SOL_SOCKET, SO_ERROR, &soErr, &slen) == 0, soErr == 0 {
-                            ok = true
+                    while true {
+                        let now = Date()
+                        let remain = deadline.timeIntervalSince(now)
+                        if remain <= 0 { lastErr = ETIMEDOUT; break }
+                        let step = min(remain, 0.200) // 200 ms steps
+                        let prc = withUnsafeMutablePointer(to: &pfd) { poll($0, 1, Int32(step * 1000.0)) }
+                        if prc > 0 {
+                            var soErr: Int32 = 0
+                            var slen = socklen_t(MemoryLayout.size(ofValue: soErr))
+                            if getsockopt(s, SOL_SOCKET, SO_ERROR, &soErr, &slen) == 0, soErr == 0 {
+                                ok = true
+                            } else {
+                                lastErr = (soErr != 0) ? soErr : errno
+                            }
+                            break
+                        } else if prc == 0 {
+                            continue
                         } else {
-                            lastErr = (soErr != 0) ? soErr : errno
+                            lastErr = errno
+                            break
                         }
-                    } else if prc == 0 {
-                        // Poll timeout
-                        lastErr = ETIMEDOUT
-                    } else {
-                        // Poll error
-                        lastErr = errno
                     }
                 } else {
-                    // Immediate error
                     lastErr = errno
                 }
 
@@ -193,7 +153,6 @@ final class TCPClient {
                     self.fd = s
                     connected = true
                 } else {
-                    // Try next candidate address
                     close(s)
                     ai = aiP.ai_next
                 }
@@ -205,27 +164,18 @@ final class TCPClient {
                 if lastErr == ETIMEDOUT {
                     completion(.failure(TcpError.connectTimeout))
                 } else if lastErr != 0 {
-                    // Return a precise POSIX error (e.g., ECONNREFUSED, ENETUNREACH, etc.).
                     let msg = String(cString: strerror(lastErr))
-                    let err = NSError(domain: NSPOSIXErrorDomain,
-                                      code: Int(lastErr),
-                                      userInfo: [NSLocalizedDescriptionKey: msg])
+                    let err = NSError(domain: NSPOSIXErrorDomain, code: Int(lastErr), userInfo: [NSLocalizedDescriptionKey: msg])
                     completion(.failure(err))
                 } else {
-                    // Fallback in case errno got lost; treat it as a connect timeout.
                     completion(.failure(TcpError.connectTimeout))
                 }
             }
         }
     }
 
-    /// Public disconnect entrypoint — executes on the client queue.
-    func disconnect() {
-        queue.async { self.disconnectInternal(reason: .manual) }
-    }
+    func disconnect() { queue.async { self.disconnectInternal(reason: .manual) } }
 
-    /// Internal teardown. Cancels the read source, shuts down and closes the socket,
-    /// resets flags, and notifies the delegate if we had an active connection.
     private func disconnectInternal(reason: DisconnectReason) {
         let had = (fd >= 0) || reading
         rrInFlight = false
@@ -243,78 +193,126 @@ final class TCPClient {
         if had { delegate?.tcpClientDidDisconnect(self, reason: reason) }
     }
 
-    /// Cheap connection health check:
-    /// - Poll for POLLOUT (writable) and ensure no error/hup/nval bits are present.
-    /// - Returns true if the descriptor looks good; false otherwise.
+    /// Robust connectivity check without a running reader:
+    /// uses non-blocking MSG_PEEK to detect EOF immediately.
     func isConnected() -> Bool {
         var ok = false
         queue.sync {
             guard fd >= 0 else { ok = false; return }
-            var p = pollfd(fd: fd, events: Int16(POLLOUT), revents: 0)
+
+            if reading || rrInFlight { ok = true; return }
+
+            var p = pollfd(fd: fd, events: Int16(POLLIN | POLLERR | POLLHUP | POLLNVAL), revents: 0)
             let rc = withUnsafeMutablePointer(to: &p) { poll($0, 1, 0) }
-            if rc > 0 {
-                let bad = (p.revents & Int16(POLLERR | POLLHUP | POLLNVAL)) != 0
-                ok = !bad
-            } else {
-                // rc == 0 (no events) or rc < 0 (transient); keep the connection optimistic.
+            if rc < 0 {
+                let e = errno
+                self.disconnectInternal(reason: .error(NSError(domain: NSPOSIXErrorDomain, code: Int(e))))
+                ok = false
+                return
+            }
+            if (p.revents & Int16(POLLERR | POLLHUP | POLLNVAL)) != 0 {
+                self.disconnectInternal(reason: .remote)
+                ok = false
+                return
+            }
+
+            var c: UInt8 = 0
+            let n: Int = withUnsafeMutableBytes(of: &c) { rawPtr in
+                guard let base = rawPtr.baseAddress else { return -1 }
+                return Darwin.recv(self.fd, base, 1, MSG_PEEK)
+            }
+
+            if n == 0 {
+                self.disconnectInternal(reason: .remote)
+                ok = false
+            } else if n > 0 {
                 ok = true
+            } else {
+                let e = errno
+                ok = (e == EAGAIN || e == EWOULDBLOCK)
+                if !ok {
+                    self.disconnectInternal(reason: .error(NSError(domain: NSPOSIXErrorDomain, code: Int(e))))
+                }
             }
         }
         return ok
     }
 
+    // MARK: - Low-level send helper (automatic POLLOUT backoff)
+
+    /// Send all bytes with non-blocking socket handling.
+    /// On EAGAIN/EWOULDBLOCK waits for POLLOUT in 10ms steps until budget expires.
+    private func sendAll(_ bytes: [UInt8], budgetMs: Int) throws -> Int {
+        var sent = 0
+        let total = bytes.count
+        let deadline = Date().addingTimeInterval(Double(max(1, budgetMs)) / 1000.0)
+
+        while sent < total {
+            let n = bytes.withUnsafeBytes { p -> Int in
+                let base = p.baseAddress!.advanced(by: sent)
+                return Darwin.send(self.fd, base, total - sent, 0)
+            }
+            if n >= 0 {
+                sent += n
+                continue
+            }
+            let e = errno
+            if e == EPIPE {
+                self.disconnectInternal(reason: .remote)
+                throw TcpError.closed
+            } else if e == EAGAIN || e == EWOULDBLOCK {
+                // wait for POLLOUT
+                while true {
+                    let now = Date()
+                    let remain = deadline.timeIntervalSince(now)
+                    if remain <= 0 { throw TcpError.connectTimeout }
+                    let stepSec = min(remain, 0.010) // 10ms
+                    var pfd = pollfd(fd: self.fd, events: Int16(POLLOUT), revents: 0)
+                    let prc = withUnsafeMutablePointer(to: &pfd) { poll($0, 1, Int32(stepSec * 1000.0)) }
+                    if prc > 0 { break }
+                    if prc < 0 {
+                        let perr = errno
+                        throw NSError(domain: NSPOSIXErrorDomain, code: Int(perr),
+                                      userInfo: [NSLocalizedDescriptionKey: String(cString: strerror(perr))])
+                    }
+                    // prc == 0 => timed step; loop until deadline
+                }
+            } else {
+                throw NSError(domain: NSPOSIXErrorDomain, code: Int(e),
+                              userInfo: [NSLocalizedDescriptionKey: String(cString: strerror(e))])
+            }
+        }
+        return sent
+    }
+
     // MARK: - Write
 
-    /// Write the entire byte array to the socket.
-    /// - Uses a loop to handle short writes on non-blocking sockets.
-    /// - On EPIPE we treat it as remote disconnect and notify via delegate.
     func write(_ bytes: [UInt8], completion: @escaping (Result<Int, Error>) -> Void) {
         queue.async {
             guard self.fd >= 0 else { completion(.failure(TcpError.notConnected)); return }
             if self.rrInFlight { completion(.failure(TcpError.busy)); return }
-
-            var sent = 0
-            let total = bytes.count
-            while sent < total {
-                let toSend = total - sent
-                let n = bytes.withUnsafeBytes { p -> Int in
-                    let base = p.baseAddress!.advanced(by: sent)
-                    // SO_NOSIGPIPE prevents SIGPIPE signals on broken pipes.
-                    return Darwin.send(self.fd, base, toSend, 0)
-                }
-                if n < 0 {
-                    let e = errno
-                    if e == EPIPE {
-                        self.disconnectInternal(reason: .remote)
-                        completion(.failure(TcpError.closed))
-                    } else {
-                        self.disconnectInternal(reason: .error(NSError(domain: NSPOSIXErrorDomain, code: Int(e))))
-                        completion(.failure(NSError(domain: NSPOSIXErrorDomain, code: Int(e))))
-                    }
-                    return
-                }
-                sent += n
+            do {
+                let n = try self.sendAll(bytes, budgetMs: 3000)
+                completion(.success(n))
+            } catch {
+                completion(.failure(error))
             }
-            completion(.success(sent))
         }
     }
 
-    // MARK: - Stream read (events)
+    // MARK: - Stream
 
-    /// Start continuous read using `DispatchSourceRead`.
-    /// - Allocates a fixed-size buffer (`chunkSize`) and drains the socket until EAGAIN/EWOULDBLOCK.
-    /// - Emits each read chunk to the delegate.
-    /// - On 0 bytes (EOF) treats it as remote disconnect.
     func startRead(chunkSize: Int = 4096) {
         queue.async {
             guard self.fd >= 0 else { return }
             if self.reading { return }
             self.reading = true
+            self.lastChunkSize = max(1, chunkSize)
 
             let src = DispatchSource.makeReadSource(fileDescriptor: self.fd, queue: self.queue)
             src.setEventHandler { [weak self] in
                 guard let self = self else { return }
-                let size = max(1, chunkSize)
+                let size = self.lastChunkSize
                 var buf = [UInt8](repeating: 0, count: size)
                 while true {
                     let n = buf.withUnsafeMutableBytes { p -> Int in
@@ -325,25 +323,21 @@ final class TCPClient {
                         self.delegate?.tcpClient(self, didReceive: Data(buf[0..<n]))
                         continue
                     } else if n == 0 {
-                        // EOF – remote closed the connection.
                         self.disconnectInternal(reason: .remote)
                         break
                     } else {
                         let e = errno
                         if e == EAGAIN || e == EWOULDBLOCK { break }
-                        // Other recv errors => treat as fatal and notify.
                         self.disconnectInternal(reason: .error(NSError(domain: NSPOSIXErrorDomain, code: Int(e))))
                         break
                     }
                 }
             }
-            src.setCancelHandler { }
             self.readSource = src
             src.resume()
         }
     }
 
-    /// Stop the streaming read and release the source.
     func stopRead() {
         queue.async {
             self.reading = false
@@ -352,100 +346,133 @@ final class TCPClient {
         }
     }
 
-    /// Lightweight flag getter (queue-confined).
     func isReading() -> Bool { return reading }
 
-    // MARK: - Write & wait for pattern (request/response)
+    // MARK: - Write & wait for pattern (RR) with adaptive "until idle"
 
-    /// Perform a one-shot request/response on the same socket.
-    ///
-    /// Steps:
-    /// 1) Guard against concurrent RR (`rrInFlight`).
-    /// 2) Send all bytes (looping on short writes).
-    /// 3) Repeatedly poll for readability with small steps (<= 200 ms) until:
-    ///    - `expect` pattern appears, or
-    ///    - `maxBytes` reached, or
-    ///    - timeout expires.
-    ///
-    /// Notes:
-    /// - This RR helper is independent of the streaming read; the plugin typically suspends
-    ///   streaming during RR to avoid the stream consumer eating the response.
+    /// Automatic "until idle" when `expect == nil`.
+    /// - Starts with base idle 50ms.
+    /// - Tracks inter-arrival times and sets idle = clamp(median * 1.75, 50ms…200ms).
     func writeAndRead(_ bytes: [UInt8],
-                      timeoutMs: Int = 1000,
+                      timeout: Int = 1000,
                       maxBytes: Int = 4096,
                       expect: ((Data) -> Bool)? = nil,
-                      completion: @escaping (Result<Data, Error>) -> Void) {
+                      suspendStreamDuringRR: Bool = true,
+                      completion: @escaping (Result<ReadResult, Error>) -> Void) {
         queue.async {
             guard self.fd >= 0 else { completion(.failure(TcpError.notConnected)); return }
             guard !self.rrInFlight else { completion(.failure(TcpError.busy)); return }
             self.rrInFlight = true
+            func finish(_ r: Result<ReadResult, Error>) { self.rrInFlight = false; completion(r) }
 
-            func finish(_ r: Result<Data, Error>) {
-                self.rrInFlight = false
-                completion(r)
+            let wasReading = self.reading
+            if suspendStreamDuringRR && wasReading {
+                self.stopRead()
             }
 
-            // --- Send phase (handle short writes, EPIPE, etc.) ---
-            var sent = 0
-            while sent < bytes.count {
-                let n = bytes.withUnsafeBytes {
-                    Darwin.send(self.fd, $0.baseAddress!.advanced(by: sent), bytes.count - sent, 0)
+            // Send phase (budget = timeout)
+            do {
+                _ = try self.sendAll(bytes, budgetMs: max(1, timeout))
+            } catch {
+                if case TcpError.closed = error {
+                    self.disconnectInternal(reason: .remote)
                 }
-                if n < 0 {
-                    let e = errno
-                    if e == EPIPE {
-                        self.disconnectInternal(reason: .remote)
-                        finish(.failure(TcpError.closed))
-                    } else {
-                        self.disconnectInternal(reason: .error(NSError(domain: NSPOSIXErrorDomain, code: Int(e))))
-                        finish(.failure(NSError(domain: NSPOSIXErrorDomain, code: Int(e))))
-                    }
-                    return
-                }
-                sent += n
+                finish(.failure(error))
+                if suspendStreamDuringRR && wasReading && self.fd >= 0 { self.startRead(chunkSize: self.lastChunkSize) }
+                return
             }
 
-            // --- Receive phase using poll(POLLIN) with a global timeout budget ---
+            // Receive phase with global timeout budget
             let cap = max(1, maxBytes)
-            // `Data(capacity:)` reserves but length grows as we append; efficient for concat.
             var out = Data(capacity: cap)
             var pfd = pollfd(fd: self.fd, events: Int16(POLLIN), revents: 0)
-            var remain = max(1, timeoutMs)
+            var remain = max(1, timeout)
+            var matched = false
+
+            // adaptive idle
+            var lastDataTime = Date.distantPast
+            var interArrivals: [Double] = [] // ms, keep last 5
+
+            func currentIdleThresholdMs() -> Int {
+                guard !interArrivals.isEmpty else { return 50 }
+                let sorted = interArrivals.sorted()
+                let med = (sorted.count % 2 == 1)
+                    ? sorted[sorted.count/2]
+                    : 0.5 * (sorted[sorted.count/2 - 1] + sorted[sorted.count/2])
+                let thr = Int(med * 1.75)
+                return max(50, min(200, thr))
+            }
 
             while out.count < cap && remain > 0 {
-                let step = min(remain, 200) // small poll slices improve responsiveness to early matches
+                let step = min(remain, 50) // fine-grained to evaluate idle
                 let rc = withUnsafeMutablePointer(to: &pfd) { poll($0, 1, Int32(step)) }
                 remain -= step
-                if rc == 0 { continue } // still waiting
+
+                if rc == 0 {
+                    // no new data this tick
+                    if expect == nil && out.count > 0 {
+                        let idleMs = Int(Date().timeIntervalSince(lastDataTime) * 1000.0)
+                        if idleMs >= currentIdleThresholdMs() {
+                            finish(.success(ReadResult(data: out, matched: false)))
+                            if suspendStreamDuringRR && wasReading && self.fd >= 0 { self.startRead(chunkSize: self.lastChunkSize) }
+                            return
+                        }
+                    }
+                    continue
+                }
                 if rc < 0 {
                     let e = errno
                     finish(.failure(NSError(domain: NSPOSIXErrorDomain, code: Int(e))))
+                    if suspendStreamDuringRR && wasReading && self.fd >= 0 { self.startRead(chunkSize: self.lastChunkSize) }
                     return
                 }
-                // Socket readable
-                let want = min(2048, cap - out.count)
-                var tmp = [UInt8](repeating: 0, count: want)
+
+                var tmp = [UInt8](repeating: 0, count: min(4096, cap - out.count))
                 let n = tmp.withUnsafeMutableBytes { p -> Int in
                     guard let base = p.baseAddress else { return -1 }
                     return Darwin.recv(self.fd, base, p.count, 0)
                 }
                 if n > 0 {
-                    out.append(tmp, count: n)
-                    if let match = expect, match(out) { finish(.success(out)); return }
-                    if expect == nil { finish(.success(out)); return } // first chunk policy when no pattern
-                    continue
+                    out.append(contentsOf: tmp[0..<n])
+                    let now = Date()
+                    if lastDataTime != .distantPast {
+                        let deltaMs = (now.timeIntervalSince(lastDataTime) * 1000.0)
+                        interArrivals.append(deltaMs)
+                        if interArrivals.count > 5 { interArrivals.removeFirst(interArrivals.count - 5) }
+                    }
+                    lastDataTime = now
+
+                    if let ex = expect {
+                        if ex(out) { matched = true; break }
+                        if out.count >= cap { break }
+                    } else {
+                        if out.count >= cap { break } // cap reached, return below
+                        continue // keep collecting until idle
+                    }
                 } else if n == 0 {
-                    // Peer closed during RR
-                    finish(.failure(TcpError.closed)); return
+                    self.disconnectInternal(reason: .remote)
+                    finish(.failure(TcpError.closed))
+                    if suspendStreamDuringRR && wasReading && self.fd >= 0 { self.startRead(chunkSize: self.lastChunkSize) }
+                    return
                 } else {
                     let e = errno
                     if e == EAGAIN || e == EWOULDBLOCK { continue }
+                    self.disconnectInternal(reason: .error(NSError(domain: NSPOSIXErrorDomain, code: Int(e))))
                     finish(.failure(NSError(domain: NSPOSIXErrorDomain, code: Int(e))))
+                    if suspendStreamDuringRR && wasReading && self.fd >= 0 { self.startRead(chunkSize: self.lastChunkSize) }
                     return
                 }
             }
-            // Timeout or cap reached: return what we have (even empty) as success.
-            finish(.success(out))
+
+            if out.isEmpty && !matched && remain <= 0 {
+                finish(.failure(TcpError.connectTimeout))
+            } else {
+                finish(.success(ReadResult(data: out, matched: matched)))
+            }
+
+            if suspendStreamDuringRR && wasReading && self.fd >= 0 {
+                self.startRead(chunkSize: self.lastChunkSize)
+            }
         }
     }
 }

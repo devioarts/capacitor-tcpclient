@@ -75,24 +75,23 @@ module.exports.createTCPClientAPI = ({ ipcRenderer }) => {
 
     /**
      * Write raw bytes to the socket.
-     * Expects { data:number[] } and returns { error, errorMessage, bytesWritten }.
+     * Expects { data:number[] } and returns { error, errorMessage, bytesSent }.
      */
     async write(args) {
       try {
         const res = await ipcRenderer.invoke('tcpclient:write', args);
-        return hasStdShape(res) ? res : ok({ bytesWritten: +res?.bytesWritten || 0 });
-      } catch (e) { return fail(e, { bytesWritten: 0 }); }
+        return hasStdShape(res) ? res : ok({ bytesSent: +res?.bytesSent || 0 });
+      } catch (e) { return fail(e, { bytesSent: 0 }); }
     },
 
     /**
-     * Start continuous reading. Accepts { chunkSize?, timeoutMs?/readTimeoutMs? }.
+     * Start continuous reading. Accepts { chunkSize?, timeout?/readTimeoutMs? }.
      * - For compatibility, maps readTimeoutMs -> timeoutMs if provided.
      * Returns { error, errorMessage, reading }.
      */
     async startRead(args) {
       try {
         const a = { ...args };
-        if (a.timeoutMs == null && a.readTimeoutMs != null) a.timeoutMs = a.readTimeoutMs;
         const res = await ipcRenderer.invoke('tcpclient:startRead', a);
         return hasStdShape(res) ? res : ok({ reading: true });
       } catch (e) { return fail(e, { reading: false }); }
@@ -115,7 +114,7 @@ module.exports.createTCPClientAPI = ({ ipcRenderer }) => {
      */
     async setReadTimeout(args) {
       try {
-        const a = { timeoutMs: args?.timeoutMs ?? args?.ms };
+        const a = { readTimeout: args?.readTimeout };
         const res = await ipcRenderer.invoke('tcpclient:setReadTimeout', a);
         return hasStdShape(res) ? res : ok();
       } catch (e) { return fail(e); }
@@ -125,22 +124,22 @@ module.exports.createTCPClientAPI = ({ ipcRenderer }) => {
      * Request/Response helper: write bytes and wait for a reply with optional early-exit pattern.
      * Accepts:
      *  - data:number[]
-     *  - timeoutMs?:number
+     *  - timeout?:number
      *  - maxBytes?:number
      *  - expect?:number[]|hex-string
      *  - suspendStreamDuringRR?:boolean
-     * Returns standardized shape with { data:number[], bytesWritten, bytesRead }.
+     * Returns standardized shape with { data:number[], bytesSent, bytesReceived }.
      */
     async writeAndRead(args) {
       try {
         const res = await ipcRenderer.invoke('tcpclient:writeAndRead', args);
         if (hasStdShape(res)) return res;
         const data = res?.data || [];
-        const bytesWritten = typeof res?.bytesWritten === 'number' ? res.bytesWritten : null;
-        const bytesRead  = typeof res?.bytesRead  === 'number' ? res.bytesRead  : data.length;
-        return ok({ data, bytesWritten, bytesRead });
+        const bytesSent = typeof res?.bytesSent === 'number' ? res.bytesSent : null;
+        const bytesReceived  = typeof res?.bytesReceived  === 'number' ? res.bytesReceived  : data.length;
+        return ok({ data, bytesSent, bytesReceived, matched: !!res?.matched });
       } catch (e) {
-        return fail(e, { data: [], bytesWritten: null, bytesRead: null });
+        return fail(e, { data: [], bytesSent: null, bytesReceived: null, matched: false });
       }
     },
 

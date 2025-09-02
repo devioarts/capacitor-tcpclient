@@ -12,12 +12,16 @@ npx cap sync
 ## Android
 #### /android/app/src/main/AndroidManifest.xml
 ```xml
+<application 
+        android:usesCleartextTraffic="true"
+></application>
+
 <uses-permission android:name="android.permission.INTERNET" />
 <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 <!-- Android 12+ -->
 <uses-permission android:name="android.permission.NEARBY_WIFI_DEVICES" />
 <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
-<application android:usesCleartextTraffic="true"></application>
+
 ```
 
 ## iOS
@@ -36,82 +40,36 @@ npx cap sync
 > Implementation example was developed on [capacitor-electron](https://github.com/devioarts/capacitor-examples/tree/main/capacitor-electron)
 > base, if you run electron differently, you may need to adjust the code.
 #### /electron/main.ts
-
 ```typescript
-import { app, BrowserWindow, session, ipcMain } from 'electron';
-import * as path from 'path';
-import * as url from 'url';
-
+// ...
 // THIS LINE IS IMPORTANT FOR PLUGIN!
 import {TCPClient} from "@devioarts/capacitor-tcpclient/electron/tcpclient";
-
-import express from 'express';
-import type { AddressInfo } from 'net';
-
-const isDev = !app.isPackaged;
-
+// ...
 // THIS LINE IS IMPORTANT FOR PLUGIN!
 let tcpClient: TCPClient | null = null;
-
-async function startLocalHttp(distDir: string): Promise<number> {
-  return new Promise((resolve, reject) => {
-    const web = express();
-    web.use(express.static(distDir));
-    const server = web.listen(0, '127.0.0.1', () => {
-      const addr = server.address() as AddressInfo;
-      resolve(addr.port);
-    });
-    server.on('error', reject);
-  });
-}
-
+// ...
 function createWindow() {
-  const win = new BrowserWindow({
-    fullscreen: true,
-    frame: false,
-    autoHideMenuBar: true,
-    webPreferences: {
-      contextIsolation: true,
-      preload: path.join(__dirname, 'preload.cjs'),
-      sandbox: false,
-    },
-  });
-  
+  const win = new BrowserWindow(
+    // ...
+  );
+  // ...
   // THIS LINE IS IMPORTANT FOR PLUGIN!
   tcpClient = new TCPClient(win);
-
-  if (isDev) {
-    win.loadURL('http://localhost:8006'); //change to your port
-  } else {
-    const DIST_DIR = path.join(__dirname, '../dist');
-    startLocalHttp(DIST_DIR).then((port) => {
-      win.loadURL(`http://localhost:${port}/index.html`);
-    });
-  }
-  win.webContents.openDevTools();
+  // ...
 }
-
-app.whenReady().then(() => {
-  createWindow();
-});
-app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') app.quit();
-});
+// ...
 ```
 
-### electron/preload.cjs
+#### electron/preload.cjs
 ```javascript
 const { contextBridge, ipcRenderer } = require("electron");
 
 // THIS LINE IS IMPORTANT FOR PLUGIN!
 const {createTCPClientAPI} = require("@devioarts/capacitor-tcpclient/electron/tcpclient-bridge.cjs");
-
-window.addEventListener('DOMContentLoaded', () => {
-  console.log('Electron preload loaded');
-});
-
+// ...
 // THIS LINE IS IMPORTANT FOR PLUGIN!
 contextBridge.exposeInMainWorld('TCPClient', createTCPClientAPI({ ipcRenderer }));
+// ...
 ```
 ---
 ## API
@@ -119,13 +77,13 @@ contextBridge.exposeInMainWorld('TCPClient', createTCPClientAPI({ ipcRenderer })
 <docgen-index>
 
 * [`connect(...)`](#connect)
+* [`disconnect()`](#disconnect)
+* [`isConnected()`](#isconnected)
+* [`isReading()`](#isreading)
 * [`write(...)`](#write)
 * [`writeAndRead(...)`](#writeandread)
 * [`startRead(...)`](#startread)
 * [`stopRead()`](#stopread)
-* [`isConnected()`](#isconnected)
-* [`disconnect()`](#disconnect)
-* [`isReading()`](#isreading)
 * [`setReadTimeout(...)`](#setreadtimeout)
 * [`addListener('tcpData', ...)`](#addlistenertcpdata-)
 * [`addListener('tcpDisconnect', ...)`](#addlistenertcpdisconnect-)
@@ -138,22 +96,16 @@ contextBridge.exposeInMainWorld('TCPClient', createTCPClientAPI({ ipcRenderer })
 <docgen-api>
 <!--Update the source file JSDoc comments and rerun docgen to update the docs below-->
 
-Public plugin surface exposed to JS/TS consumers.
-
-Usage example:
-```ts
-const res = await TCPClient.tcpConnect({ host: '192.168.1.50', port: 9100 });
-if (!res.error && res.connected) {
-  await TCPClient.tcpStartRead({ chunkSize: 1024 });
-  const rr = await TCPClient.tcpWriteAndRead({ data: [0x1b, 0x40], timeoutMs: 500 });
-}
-```
+The Capacitor plugin contract. All methods resolve; errors are returned in the
+payload (error=true, errorMessage=string) rather than throwing.
 
 ### connect(...)
 
 ```typescript
 connect(options: TcpConnectOptions) => Promise<TcpConnectResult>
 ```
+
+Open a TCP connection.
 
 | Param         | Type                                                            |
 | ------------- | --------------------------------------------------------------- |
@@ -164,11 +116,52 @@ connect(options: TcpConnectOptions) => Promise<TcpConnectResult>
 --------------------
 
 
+### disconnect()
+
+```typescript
+disconnect() => Promise<TcpDisconnectResult>
+```
+
+Close the TCP connection. Idempotent. Triggers tcpDisconnect(manual).
+
+**Returns:** <code>Promise&lt;<a href="#tcpdisconnectresult">TcpDisconnectResult</a>&gt;</code>
+
+--------------------
+
+
+### isConnected()
+
+```typescript
+isConnected() => Promise<TcpIsConnectedResult>
+```
+
+Check whether the socket is connected.
+
+**Returns:** <code>Promise&lt;<a href="#tcpisconnectedresult">TcpIsConnectedResult</a>&gt;</code>
+
+--------------------
+
+
+### isReading()
+
+```typescript
+isReading() => Promise<TcpIsReadingResult>
+```
+
+Check whether the stream reader is active.
+
+**Returns:** <code>Promise&lt;<a href="#tcpisreadingresult">TcpIsReadingResult</a>&gt;</code>
+
+--------------------
+
+
 ### write(...)
 
 ```typescript
 write(options: TcpWriteOptions) => Promise<TcpWriteResult>
 ```
+
+Write raw bytes.
 
 | Param         | Type                                                        |
 | ------------- | ----------------------------------------------------------- |
@@ -185,6 +178,8 @@ write(options: TcpWriteOptions) => Promise<TcpWriteResult>
 writeAndRead(options: TcpWriteAndReadOptions) => Promise<TcpWriteAndReadResult>
 ```
 
+Write request, then read reply under the given constraints.
+
 | Param         | Type                                                                      |
 | ------------- | ------------------------------------------------------------------------- |
 | **`options`** | <code><a href="#tcpwriteandreadoptions">TcpWriteAndReadOptions</a></code> |
@@ -199,6 +194,8 @@ writeAndRead(options: TcpWriteAndReadOptions) => Promise<TcpWriteAndReadResult>
 ```typescript
 startRead(options?: TcpStartReadOptions | undefined) => Promise<TcpStartStopResult>
 ```
+
+Start emitting tcpData events. Safe to call multiple times.
 
 | Param         | Type                                                                |
 | ------------- | ------------------------------------------------------------------- |
@@ -215,40 +212,9 @@ startRead(options?: TcpStartReadOptions | undefined) => Promise<TcpStartStopResu
 stopRead() => Promise<TcpStartStopResult>
 ```
 
+Stop emitting tcpData events. Safe to call multiple times.
+
 **Returns:** <code>Promise&lt;<a href="#tcpstartstopresult">TcpStartStopResult</a>&gt;</code>
-
---------------------
-
-
-### isConnected()
-
-```typescript
-isConnected() => Promise<TcpIsConnectedResult>
-```
-
-**Returns:** <code>Promise&lt;<a href="#tcpisconnectedresult">TcpIsConnectedResult</a>&gt;</code>
-
---------------------
-
-
-### disconnect()
-
-```typescript
-disconnect() => Promise<TcpDisconnectResult>
-```
-
-**Returns:** <code>Promise&lt;<a href="#tcpdisconnectresult">TcpDisconnectResult</a>&gt;</code>
-
---------------------
-
-
-### isReading()
-
-```typescript
-isReading() => Promise<TcpIsReadingResult>
-```
-
-**Returns:** <code>Promise&lt;<a href="#tcpisreadingresult">TcpIsReadingResult</a>&gt;</code>
 
 --------------------
 
@@ -256,14 +222,17 @@ isReading() => Promise<TcpIsReadingResult>
 ### setReadTimeout(...)
 
 ```typescript
-setReadTimeout(options: { ms: number; }) => Promise<BaseResult>
+setReadTimeout(options: { readTimeout: number; }) => Promise<{ error: boolean; errorMessage?: string | null; }>
 ```
 
-| Param         | Type                         |
-| ------------- | ---------------------------- |
-| **`options`** | <code>{ ms: number; }</code> |
+Configure stream read timeout (Android only). iOS: no-op; Electron: stored
+for RR defaults. Provided for API parity across platforms.
 
-**Returns:** <code>Promise&lt;<a href="#baseresult">BaseResult</a>&gt;</code>
+| Param         | Type                                  |
+| ------------- | ------------------------------------- |
+| **`options`** | <code>{ readTimeout: number; }</code> |
+
+**Returns:** <code>Promise&lt;{ error: boolean; errorMessage?: string | null; }&gt;</code>
 
 --------------------
 
@@ -273,6 +242,8 @@ setReadTimeout(options: { ms: number; }) => Promise<BaseResult>
 ```typescript
 addListener(eventName: 'tcpData', listenerFunc: (event: TcpDataEvent) => void) => Promise<PluginListenerHandle>
 ```
+
+Subscribe to micro-batched stream data events.
 
 | Param              | Type                                                                      |
 | ------------------ | ------------------------------------------------------------------------- |
@@ -290,6 +261,8 @@ addListener(eventName: 'tcpData', listenerFunc: (event: TcpDataEvent) => void) =
 addListener(eventName: 'tcpDisconnect', listenerFunc: (event: TcpDisconnectEvent) => void) => Promise<PluginListenerHandle>
 ```
 
+Subscribe to disconnect notifications.
+
 | Param              | Type                                                                                  |
 | ------------------ | ------------------------------------------------------------------------------------- |
 | **`eventName`**    | <code>'tcpDisconnect'</code>                                                          |
@@ -306,47 +279,104 @@ addListener(eventName: 'tcpDisconnect', listenerFunc: (event: TcpDisconnectEvent
 removeAllListeners() => Promise<void>
 ```
 
+Remove all tcpData/tcpDisconnect listeners.
+
 --------------------
 
 
 ### Interfaces
 
 
-#### BaseResult
+#### TcpConnectResult
 
-Common result shape returned by all methods for predictable error handling.
+Result of connect().
+- connected=true on success; false on failure.
+- error=true with errorMessage on failure (e.g., "connect timeout",
+  "connect failed: ...").
 
 | Prop               | Type                        |
 | ------------------ | --------------------------- |
 | **`error`**        | <code>boolean</code>        |
 | **`errorMessage`** | <code>string \| null</code> |
+| **`connected`**    | <code>boolean</code>        |
 
 
 #### TcpConnectOptions
 
-Options for opening a TCP connection.
+Connection parameters for opening a TCP socket.
 
-Parity:
-- Mirrors iOS/Android native options.
-Defaults:
-- port: 9100
-- timeoutMs: 3000
-- noDelay: true
-- keepAlive: true
+Notes by platform:
+- Android: validates port range (1..65535); applies TCP_NODELAY and SO_KEEPALIVE
+  according to the flags. Connect timeout is enforced by Socket#connect.
+- iOS: sets TCP_NODELAY, SO_KEEPALIVE and SO_NOSIGPIPE. Connect timeout is
+  enforced using non-blocking connect + polling.
+- Electron: sets noDelay and keepAlive (with 60s initial delay). Connect
+  timeout is emulated via a JS timer that destroys the socket if elapsed.
 
-| Prop            | Type                 |
-| --------------- | -------------------- |
-| **`host`**      | <code>string</code>  |
-| **`port`**      | <code>number</code>  |
-| **`timeoutMs`** | <code>number</code>  |
-| **`noDelay`**   | <code>boolean</code> |
-| **`keepAlive`** | <code>boolean</code> |
+| Prop            | Type                 | Description                                                              |
+| --------------- | -------------------- | ------------------------------------------------------------------------ |
+| **`host`**      | <code>string</code>  | Hostname or IP address to connect to. Required.                          |
+| **`port`**      | <code>number</code>  | TCP port, defaults to 9100. Valid range 1..65535 (validated on Android). |
+| **`timeout`**   | <code>number</code>  | Connect timeout in milliseconds, defaults to 3000.                       |
+| **`noDelay`**   | <code>boolean</code> | Enable TCP_NODELAY (Nagle off). Defaults to true.                        |
+| **`keepAlive`** | <code>boolean</code> | Enable SO_KEEPALIVE. Defaults to true.                                   |
+
+
+#### TcpDisconnectResult
+
+Result of disconnect(). Always resolves. After disconnect, reading is false.
+A tcpDisconnect event with reason 'manual' is also emitted by platforms.
+
+| Prop               | Type                        | Description                                                          |
+| ------------------ | --------------------------- | -------------------------------------------------------------------- |
+| **`error`**        | <code>boolean</code>        |                                                                      |
+| **`errorMessage`** | <code>string \| null</code> |                                                                      |
+| **`disconnected`** | <code>boolean</code>        | True if the instance transitioned to disconnected state.             |
+| **`reading`**      | <code>boolean</code>        | Whether the stream reader is active (always false after disconnect). |
+
+
+#### TcpIsConnectedResult
+
+Result of isConnected().
+- Android performs a safe 1-byte peek unless streaming/RR is active, in which
+  case it returns true if those are active to avoid consuming input.
+- iOS/Electron return based on current socket open/close state.
+
+| Prop               | Type                        |
+| ------------------ | --------------------------- |
+| **`error`**        | <code>boolean</code>        |
+| **`errorMessage`** | <code>string \| null</code> |
+| **`connected`**    | <code>boolean</code>        |
+
+
+#### TcpIsReadingResult
+
+Result of isReading(). True if stream reader is active.
+
+| Prop               | Type                        |
+| ------------------ | --------------------------- |
+| **`error`**        | <code>boolean</code>        |
+| **`errorMessage`** | <code>string \| null</code> |
+| **`reading`**      | <code>boolean</code>        |
+
+
+#### TcpWriteResult
+
+Result of write().
+- bytesSent equals the request length on success; 0 on failure.
+- Fails with error=true if not connected or busy (RR in progress on some
+  platforms).
+
+| Prop               | Type                        |
+| ------------------ | --------------------------- |
+| **`error`**        | <code>boolean</code>        |
+| **`errorMessage`** | <code>string \| null</code> |
+| **`bytesSent`**    | <code>number</code>         |
 
 
 #### TcpWriteOptions
 
-Payload for raw write operations.
-`data` can be a JS number[] or <a href="#uint8array">Uint8Array</a>; values are interpreted as bytes 0..255.
+Bytes to write to the socket verbatim. Accepts number[] or <a href="#uint8array">Uint8Array</a>.
 
 | Prop       | Type                                                          |
 | ---------- | ------------------------------------------------------------- |
@@ -428,36 +458,83 @@ buffer as needed.
 | **slice** | (begin: number, end?: number \| undefined) =&gt; <a href="#arraybuffer">ArrayBuffer</a> | Returns a section of an <a href="#arraybuffer">ArrayBuffer</a>. |
 
 
+#### TcpWriteAndReadResult
+
+Result of writeAndRead().
+- bytesSent is the number of request bytes written. If the operation fails
+  due to a pure timeout (no bytes received), bytesSent can still equal the
+  request length; for other errors it is 0.
+- bytesReceived is the length of returned data (&lt;= maxBytes).
+- matched indicates whether the expect pattern (if any) was found.
+
+| Prop                | Type                        | Description                                                 |
+| ------------------- | --------------------------- | ----------------------------------------------------------- |
+| **`error`**         | <code>boolean</code>        |                                                             |
+| **`errorMessage`**  | <code>string \| null</code> |                                                             |
+| **`bytesSent`**     | <code>number</code>         |                                                             |
+| **`bytesReceived`** | <code>number</code>         |                                                             |
+| **`data`**          | <code>number[]</code>       | Received bytes (may be partial if timeout after some data). |
+| **`matched`**       | <code>boolean</code>        | True if the expect pattern was matched; false otherwise.    |
+
+
 #### TcpWriteAndReadOptions
 
-Request/Response helper: write bytes, then read back with a timeout and optional pattern.
+Options for writeAndRead() request/response operation.
 
-Notes:
-- `expect` can be a byte pattern (number[]) or a hex string (e.g., "1b40").
-- `timeoutMs` is the overall RR timeout.
-- `maxBytes` caps the response size.
-- `suspendStreamDuringRR` pauses the streaming reader during RR to avoid stealing the reply
-  (native default is **true** on both iOS and Android).
+Behavior summary (parity across Android/iOS/Electron):
+- The request is written atomically with internal serialization (no interleaved
+  writes across concurrent calls).
+- Response collection ends when ANY of these happens:
+  • expect pattern is found (matched=true), or
+  • maxBytes cap is reached, or
+  • without expect: adaptive "until-idle" period elapses after last data, or
+  • absolute timeout elapses (see errors below).
+- On timeout:
+  • If no data arrived at all, the call fails with error=true and
+    errorMessage resembling "connect timeout" and bytesSent equals the request
+    length on Android/iOS/Electron; bytesReceived=0, matched=false.
+  • If some data arrived before the deadline, the call resolves successfully
+    with matched=false and returns the partial data.
+- suspendStreamDuringRR: when true, the active stream reader is temporarily
+  stopped for the RR window to avoid racing over the same bytes; after RR it
+  is resumed with the previous chunk size. Default is true on Android & iOS;
+  Electron treats it as true by default as well.
+- expect: hex string like "0A0B0C" (case/spacing ignored) or a byte array.
 
-| Prop                        | Type                            |
-| --------------------------- | ------------------------------- |
-| **`expect`**                | <code>string \| number[]</code> |
-| **`timeoutMs`**             | <code>number</code>             |
-| **`maxBytes`**              | <code>number</code>             |
-| **`suspendStreamDuringRR`** | <code>boolean</code>            |
+| Prop                        | Type                                                                    | Description                                                                                                                                                                                                                                                            |
+| --------------------------- | ----------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **`data`**                  | <code>number[] \| <a href="#uint8array">Uint8Array</a></code>           | Request payload to send.                                                                                                                                                                                                                                               |
+| **`timeout`**               | <code>number</code>                                                     | Absolute RR timeout in ms. Defaults to 1000.                                                                                                                                                                                                                           |
+| **`maxBytes`**              | <code>number</code>                                                     | Maximum number of bytes to accumulate and return. Defaults to 4096.                                                                                                                                                                                                    |
+| **`expect`**                | <code>string \| number[] \| <a href="#uint8array">Uint8Array</a></code> | Optional expected pattern. When provided, reading stops as soon as the accumulated buffer contains this pattern. Accepts: - number[] / <a href="#uint8array">Uint8Array</a>: raw byte sequence - string: hex bytes (e.g., "0x1b40", "1B 40"), spacing and case ignored |
+| **`suspendStreamDuringRR`** | <code>boolean</code>                                                    | Temporarily suspend the stream reader during RR to avoid consuming reply in the stream. Defaults to true (Android default true; iOS behaves as if true; Electron defaults to true as well).                                                                            |
+
+
+#### TcpStartStopResult
+
+Result of startRead()/stopRead().
+
+| Prop               | Type                        | Description                                    |
+| ------------------ | --------------------------- | ---------------------------------------------- |
+| **`error`**        | <code>boolean</code>        |                                                |
+| **`errorMessage`** | <code>string \| null</code> |                                                |
+| **`reading`**      | <code>boolean</code>        | Whether the stream reader is currently active. |
 
 
 #### TcpStartReadOptions
 
-Options for starting continuous stream reading.
+Options for startRead().
+- chunkSize controls maximum size of a single tcpData event slice. Native
+  implementations may micro-batch multiple small reads; Electron additionally
+  splits a flushed batch into slices up to chunkSize to preserve consumer
+  expectations.
+- readTimeout applies only on Android (socket SO_TIMEOUT while streaming). It
+  is a no-op on iOS. Electron stores it for RR but does not apply to stream.
 
-Notes:
-- `readTimeoutMs` is Android-only; on iOS this is a no-op for API parity.
-
-| Prop                | Type                |
-| ------------------- | ------------------- |
-| **`chunkSize`**     | <code>number</code> |
-| **`readTimeoutMs`** | <code>number</code> |
+| Prop              | Type                | Description                                                        |
+| ----------------- | ------------------- | ------------------------------------------------------------------ |
+| **`chunkSize`**   | <code>number</code> | Maximum bytes per emitted tcpData event. Default 4096.             |
+| **`readTimeout`** | <code>number</code> | Stream read timeout (ms). Android: applies SO_TIMEOUT; iOS: no-op. |
 
 
 #### PluginListenerHandle
@@ -467,77 +544,39 @@ Notes:
 | **`remove`** | <code>() =&gt; Promise&lt;void&gt;</code> |
 
 
+#### TcpDataEvent
+
+Emitted by the stream reader with micro-batched data chunks.
+- Data values are 0..255. The plugin may coalesce multiple small reads and
+  then emit one or more events capped by chunkSize.
+
+| Prop       | Type                  |
+| ---------- | --------------------- |
+| **`data`** | <code>number[]</code> |
+
+
+#### TcpDisconnectEvent
+
+Emitted when the socket is closed or the plugin disconnects it.
+- reason:
+  • 'manual' — disconnect() called or instance disposed.
+  • 'remote' — the peer closed the connection (EOF).
+  • 'error'  — an I/O error occurred; error contains a message.
+- reading is false when this event fires.
+
+| Prop               | Type                                         |
+| ------------------ | -------------------------------------------- |
+| **`disconnected`** | <code>true</code>                            |
+| **`reading`**      | <code>boolean</code>                         |
+| **`reason`**       | <code>'error' \| 'manual' \| 'remote'</code> |
+| **`error`**        | <code>string</code>                          |
+
+
 ### Type Aliases
-
-
-#### TcpConnectResult
-
-Result for connect().
-
-<code><a href="#baseresult">BaseResult</a> & { connected: boolean; }</code>
-
-
-#### TcpWriteResult
-
-Result for write().
-
-<code><a href="#baseresult">BaseResult</a> & { bytesWritten: number; }</code>
 
 
 #### ArrayBufferLike
 
 <code>ArrayBufferTypes[keyof ArrayBufferTypes]</code>
-
-
-#### TcpWriteAndReadResult
-
-Result for writeAndRead().
-
-<code><a href="#baseresult">BaseResult</a> & { bytesWritten: number; bytesRead: number; data: number[]; }</code>
-
-
-#### TcpStartStopResult
-
-Result for start/stop read.
-
-<code><a href="#baseresult">BaseResult</a> & { reading: boolean; }</code>
-
-
-#### TcpIsConnectedResult
-
-Result for isConnected().
-
-<code><a href="#baseresult">BaseResult</a> & { connected: boolean; }</code>
-
-
-#### TcpDisconnectResult
-
-Result for disconnect().
-
-<code><a href="#baseresult">BaseResult</a> & { disconnected: boolean; }</code>
-
-
-#### TcpIsReadingResult
-
-Result for isReading().
-
-<code><a href="#baseresult">BaseResult</a> & { reading: boolean; }</code>
-
-
-#### TcpDataEvent
-
-Event payloads
-- `tcpData`: emitted with raw bytes as number[] (0..255)
-- `tcpDisconnect`: emitted once per disconnect with a reason
-
-Note: Android currently also includes `reading:false` in the disconnect payload
-for UI convenience; that field is optional and may be ignored here.
-
-<code>{ data: number[] }</code>
-
-
-#### TcpDisconnectEvent
-
-<code>{ disconnected: true; reason: 'manual' } | { disconnected: true; reason: 'remote' } | { disconnected: true; reason: 'error'; error: string }</code>
 
 </docgen-api>

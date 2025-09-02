@@ -34,14 +34,14 @@ declare global {
        * Open a TCP connection.
        * Defaults:
        * - port: 9100
-       * - timeoutMs: 3000
+       * - timeout: 3000
        * - noDelay: true
        * - keepAlive: true
        */
       connect(args: {
         host: string;
         port?: number;
-        timeoutMs?: number;
+        timeout?: number;
         noDelay?: boolean;
         keepAlive?: boolean;
       }): Promise<TCPStd<{ connected: boolean }>>;
@@ -56,7 +56,7 @@ declare global {
       isReading(): Promise<TCPStd<{ reading: boolean }>>;
 
       /** Write raw bytes. */
-      write(args: { data: number[] }): Promise<TCPStd<{ bytesWritten: number }>>;
+      write(args: { data: number[] }): Promise<TCPStd<{ bytesSent: number }>>;
 
       /**
        * Begin continuous reading. Large frames may be split into multiple events
@@ -64,14 +64,14 @@ declare global {
        */
       startRead(args?: {
         chunkSize?: number;
-        timeoutMs?: number; // logical read timeout used by the main process helper
+        readTimeout?: number; // logical read timeout used by the main process helper
       }): Promise<TCPStd<{ reading: boolean }>>;
 
       /** Stop continuous reading. */
       stopRead(): Promise<TCPStd<{ reading: boolean }>>;
 
-      /** Configure logical read timeout in milliseconds (used by request/response helper). */
-      setReadTimeout(args: { timeoutMs: number }): Promise<TCPStd>;
+      /** Configure logical read readTimeout in milliseconds (used by request/response helper). */
+      setReadTimeout(args: { readTimeout: number }): Promise<TCPStd>;
 
       /**
        * Request/Response helper: write bytes and collect a reply with optional early-exit pattern.
@@ -80,11 +80,11 @@ declare global {
        */
       writeAndRead(args: {
         data: number[];
-        timeoutMs?: number;
+        timeout?: number;
         maxBytes?: number;
         expect?: string | number[];
         suspendStreamDuringRR?: boolean;
-      }): Promise<TCPStd<{ data: number[]; bytesWritten: number | null; bytesRead: number | null }>>;
+      }): Promise<TCPStd<{ data: number[]; bytesSent: number | null; bytesReceived: number | null; matched: boolean }>>;
 
       /**
        * Subscribe to native events forwarded from the main process:

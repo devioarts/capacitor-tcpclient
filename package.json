@@ -1,6 +1,6 @@
 {
   "name": "@devioarts/capacitor-tcpclient",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "description": "TCP Client for CapacitorJS working on Android, iOS and Electron",
   "main": "dist/plugin.cjs.js",
   "module": "dist/esm/index.js",
