@@ -12,16 +12,8 @@ npx cap sync
 ## Android
 #### /android/app/src/main/AndroidManifest.xml
 ```xml
-<application 
-        android:usesCleartextTraffic="true"
-></application>
-
 <uses-permission android:name="android.permission.INTERNET" />
 <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
-<!-- Android 12+ -->
-<uses-permission android:name="android.permission.NEARBY_WIFI_DEVICES" />
-<uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
-
 ```
 
 ## iOS
@@ -29,6 +21,7 @@ npx cap sync
 ```xml
 <key>NSLocalNetworkUsageDescription</key>
 <string>It is needed for the correct functioning of the application</string>
+
 <key>NSAppTransportSecurity</key>
 <dict>
   <key>NSAllowsLocalNetworking</key>
@@ -72,6 +65,52 @@ contextBridge.exposeInMainWorld('TCPClient', createTCPClientAPI({ ipcRenderer })
 // ...
 ```
 ---
+
+## Technical behavior & guarantees
+
+- **Platforms:** iOS / Android / Electron — same API and return shapes.
+- **Request/Response (`writeAndRead`)**
+    - Without `expect`: returns after **until-idle** (adaptive ~50–200 ms) to capture the full reply.
+    - With `expect`: returns on first match. If `timeout` expires and **some data arrived**, returns **success** with `matched:false`; if **no data** arrived, returns a **timeout error**.
+- **Timeouts:** `timeout` is the total RR budget. `readTimeout` exists only on **Android** (continuous reader); on iOS/Electron it’s a no-op for API parity.
+- **Streaming (`tcpData` events):** micro-batched **every 10 ms or 16 KB**; on Electron the batch is split by your `chunkSize` before it’s sent to the web layer.
+- **Bytes & flags:** `bytesSent` = actually written; on RR timeout it remains the request length, on other errors it’s `0`. `bytesReceived` = length of returned `data`. `matched` = whether `expect` was found.
+- **Connectivity (`tcpIsConnected`)**: fast socket check. If RR/stream is running it returns `true`; otherwise it performs an active peek/EOF check and emits `tcpDisconnect` on remote close.
+- **Stream suspension:** `suspendStreamDuringRR` (default **true**) temporarily detaches streaming so the RR read can’t be “stolen” by the stream consumer.
+- **Security:** plain **TCP** only (no TLS). Use an external TLS terminator (e.g., stunnel) if you need TLS.
+
+## FAQ
+
+- **Why “until-idle” without `expect`?** Many devices reply in fragments; a short adaptive idle window (~50–200 ms) avoids cutting responses.
+- **Why success on `expect` + timeout (with data)?** To avoid dropping partial replies; `matched:false` tells you the pattern didn’t occur.
+- **Why `readTimeout` only on Android?** Android `Socket` uses blocking I/O where `SO_TIMEOUT` matters; iOS/Electron use evented reads.
+
+## Minimal usage (recap)
+
+```ts
+import { TCPClient } from '@devioarts/capacitor-tcpclient';
+
+await TCPClient.tcpConnect({ host: '192.168.1.100', port: 9100, timeout: 3000 });
+
+// stream (micro-batch 10 ms / 16 KB; split by chunkSize on Electron)
+await TCPClient.tcpStartRead({ chunkSize: 4096 });
+TCPClient.addListener('tcpData', ({ data }) => {
+  console.log('RX:', data.length);
+});
+
+// RR
+const rr = await TCPClient.tcpWriteAndRead({
+  data: [0x1b, 0x40],
+  timeout: 1000,
+  maxBytes: 4096,
+  // expect: '1b40' | [0x1b, 0x40]
+  suspendStreamDuringRR: true,
+});
+console.log(rr.error ? rr.errorMessage : { matched: rr.matched, bytes: rr.bytesReceived });
+
+await TCPClient.tcpDisconnect();
+```
+
 ## API
 
 <docgen-index>
