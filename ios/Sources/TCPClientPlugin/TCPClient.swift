@@ -1,3 +1,4 @@
+// swiftlint:disable cyclomatic_complexity function_body_length identifier_name type_body_length file_length force_unwrapping
 import Foundation
 import Darwin
 

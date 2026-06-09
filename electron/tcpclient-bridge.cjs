@@ -1,20 +1,26 @@
 /**
- * Electron preload-side bridge: exposes a stable, promise-based TCP API to the renderer.
- * - Delegates calls to the main process via ipcRenderer.invoke(...)
- * - Normalizes results to a common { error, errorMessage, ... } shape
- * - Provides small helpers for event subscription with remove()
+ * Electron preload-side bridge — multi-connection variant.
+ *
+ * Exposes window.TCPClient.createConnection(connectionId) to the renderer.
+ * Each call returns a frozen, connection-scoped API that automatically attaches
+ * connectionId to every IPC invoke and filters incoming events to those that
+ * belong to this specific connection.
+ *
+ * Usage in preload.js:
+ *
+ *   const { contextBridge, ipcRenderer } = require('electron');
+ *   const { createTCPClientAPI } = require('@devioarts/capacitor-tcpclient/electron/tcpclient-bridge.cjs');
+ *   contextBridge.exposeInMainWorld('TCPClient', createTCPClientAPI({ ipcRenderer }));
  */
 // eslint-disable-next-line no-undef
 module.exports.createTCPClientAPI = ({ ipcRenderer }) => {
   /**
-   * Build a success result with the standard shape.
-   * Ensures { error:false, errorMessage:null } are always present.
+   * Standard success result.
    */
   const ok = (extra = {}) => ({ error: false, errorMessage: null, ...extra });
 
   /**
-   * Build a failure result with the standard shape.
-   * Accepts Error instances, strings, or unknown values and renders a readable message.
+   * Standard failure result.
    */
   const fail = (e, extra = {}) => {
     const msg = (e && (e.message || (typeof e === 'string' ? e : null))) || String(e || 'Error');
@@ -22,148 +28,186 @@ module.exports.createTCPClientAPI = ({ ipcRenderer }) => {
   };
 
   /**
-   * Quick duck-typing check to see if a returned value already conforms to the standard shape.
-   * If so, we return it as-is; otherwise we normalize it with ok()/fail().
+   * Returns true when a value already has the { error, errorMessage } shape,
+   * so we can pass it through verbatim without re-wrapping.
    */
   const hasStdShape = (x) => x && typeof x === 'object' && typeof x.error === 'boolean' && 'errorMessage' in x;
 
   return Object.freeze({
     /**
-     * Connect to a TCP endpoint in the main process.
-     * Returns { error, errorMessage, connected }.
-     * If the main handler already returns a standardized shape, it is passed through verbatim.
+     * Create a connection-scoped API for a given connectionId.
+     * All methods automatically include connectionId in their IPC payloads.
+     * addListener delivers only events that belong to this connection.
      */
-    async connect(args) {
-      try {
-        const res = await ipcRenderer.invoke('tcpclient:connect', args);
-        return hasStdShape(res) ? res : ok({ connected: !!(res?.connected) });
-      } catch (e) { return fail(e, { connected: false }); }
-    },
+    createConnection(connectionId) {
+      // Track per-connection listeners so removeAllListeners is scoped.
+      // Map<eventName, handler[]>
+      const _handlers = new Map();
 
-    /**
-     * Disconnect current session.
-     * Returns { error, errorMessage, disconnected, reading:false }.
-     */
-    async disconnect() {
-      try {
-        const res = await ipcRenderer.invoke('tcpclient:disconnect');
-        return hasStdShape(res) ? res : ok({ disconnected: true, reading: false });
-      } catch (e) { return fail(e, { disconnected: false }); }
-    },
+      return Object.freeze({
+        get connectionId() { return connectionId; },
 
-    /**
-     * Query connection status.
-     * Returns { error, errorMessage, connected }.
-     */
-    async isConnected() {
-      try {
-        const res = await ipcRenderer.invoke('tcpclient:isConnected');
-        return hasStdShape(res) ? res : ok({ connected: !!(res?.connected) });
-      } catch (e) { return fail(e, { connected: false }); }
-    },
+        /**
+         * Open a TCP connection.
+         * Returns { error, errorMessage, connected }.
+         */
+        async connect(args) {
+          try {
+            const res = await ipcRenderer.invoke('tcpclient:connect', { ...args, connectionId });
+            return hasStdShape(res) ? res : ok({ connected: !!(res?.connected) });
+          } catch (e) { return fail(e, { connected: false }); }
+        },
 
-    /**
-     * Query stream-reading status (renderer-facing flag).
-     * Returns { error, errorMessage, reading }.
-     */
-    async isReading() {
-      try {
-        const res = await ipcRenderer.invoke('tcpclient:isReading');
-        return hasStdShape(res) ? res : ok({ reading: !!(res?.reading) });
-      } catch (e) { return fail(e, { reading: false }); }
-    },
+        /**
+         * Disconnect current session.
+         * Returns { error, errorMessage, disconnected, reading:false }.
+         */
+        async disconnect() {
+          try {
+            const res = await ipcRenderer.invoke('tcpclient:disconnect', { connectionId });
+            return hasStdShape(res) ? res : ok({ disconnected: true, reading: false });
+          } catch (e) { return fail(e, { disconnected: false }); }
+        },
 
-    /**
-     * Write raw bytes to the socket.
-     * Expects { data:number[] } and returns { error, errorMessage, bytesSent }.
-     */
-    async write(args) {
-      try {
-        const res = await ipcRenderer.invoke('tcpclient:write', args);
-        return hasStdShape(res) ? res : ok({ bytesSent: +res?.bytesSent || 0 });
-      } catch (e) { return fail(e, { bytesSent: 0 }); }
-    },
+        /**
+         * Query connection status.
+         * Returns { error, errorMessage, connected }.
+         */
+        async isConnected() {
+          try {
+            const res = await ipcRenderer.invoke('tcpclient:isConnected', { connectionId });
+            return hasStdShape(res) ? res : ok({ connected: !!(res?.connected) });
+          } catch (e) { return fail(e, { connected: false }); }
+        },
 
-    /**
-     * Start continuous reading. Accepts { chunkSize?, timeout?/readTimeoutMs? }.
-     * - For compatibility, maps readTimeoutMs -> timeoutMs if provided.
-     * Returns { error, errorMessage, reading }.
-     */
-    async startRead(args) {
-      try {
-        const a = { ...args };
-        const res = await ipcRenderer.invoke('tcpclient:startRead', a);
-        return hasStdShape(res) ? res : ok({ reading: true });
-      } catch (e) { return fail(e, { reading: false }); }
-    },
+        /**
+         * Query stream-reading status.
+         * Returns { error, errorMessage, reading }.
+         */
+        async isReading() {
+          try {
+            const res = await ipcRenderer.invoke('tcpclient:isReading', { connectionId });
+            return hasStdShape(res) ? res : ok({ reading: !!(res?.reading) });
+          } catch (e) { return fail(e, { reading: false }); }
+        },
 
-    /**
-     * Stop continuous reading.
-     * Returns { error, errorMessage, reading:false }.
-     */
-    async stopRead() {
-      try {
-        const res = await ipcRenderer.invoke('tcpclient:stopRead');
-        return hasStdShape(res) ? res : ok({ reading: false });
-      } catch (e) { return fail(e, { reading: true }); }
-    },
+        /**
+         * Write raw bytes to the socket.
+         * Expects { data:number[] } and returns { error, errorMessage, bytesSent }.
+         */
+        async write(args) {
+          try {
+            const res = await ipcRenderer.invoke('tcpclient:write', { ...args, connectionId });
+            return hasStdShape(res) ? res : ok({ bytesSent: +res?.bytesSent || 0 });
+          } catch (e) { return fail(e, { bytesSent: 0 }); }
+        },
 
-    /**
-     * Configure read timeout used by certain operations (e.g., RR helper).
-     * Accepts { timeoutMs } or legacy { ms } and forwards normalized shape.
-     */
-    async setReadTimeout(args) {
-      try {
-        const a = { readTimeout: args?.readTimeout };
-        const res = await ipcRenderer.invoke('tcpclient:setReadTimeout', a);
-        return hasStdShape(res) ? res : ok();
-      } catch (e) { return fail(e); }
-    },
+        /**
+         * Start continuous reading.
+         * Accepts { chunkSize?, readTimeout? }.
+         * Returns { error, errorMessage, reading }.
+         */
+        async startRead(args) {
+          try {
+            const res = await ipcRenderer.invoke('tcpclient:startRead', { ...args, connectionId });
+            return hasStdShape(res) ? res : ok({ reading: true });
+          } catch (e) { return fail(e, { reading: false }); }
+        },
 
-    /**
-     * Request/Response helper: write bytes and wait for a reply with optional early-exit pattern.
-     * Accepts:
-     *  - data:number[]
-     *  - timeout?:number
-     *  - maxBytes?:number
-     *  - expect?:number[]|hex-string
-     *  - suspendStreamDuringRR?:boolean
-     * Returns standardized shape with { data:number[], bytesSent, bytesReceived }.
-     */
-    async writeAndRead(args) {
-      try {
-        const res = await ipcRenderer.invoke('tcpclient:writeAndRead', args);
-        if (hasStdShape(res)) return res;
-        const data = res?.data || [];
-        const bytesSent = typeof res?.bytesSent === 'number' ? res.bytesSent : null;
-        const bytesReceived  = typeof res?.bytesReceived  === 'number' ? res.bytesReceived  : data.length;
-        return ok({ data, bytesSent, bytesReceived, matched: !!res?.matched });
-      } catch (e) {
-        return fail(e, { data: [], bytesSent: null, bytesReceived: null, matched: false });
-      }
-    },
+        /**
+         * Stop continuous reading.
+         * Returns { error, errorMessage, reading:false }.
+         */
+        async stopRead() {
+          try {
+            const res = await ipcRenderer.invoke('tcpclient:stopRead', { connectionId });
+            return hasStdShape(res) ? res : ok({ reading: false });
+          } catch (e) { return fail(e, { reading: true }); }
+        },
 
-    /**
-     * Subscribe to native events forwarded by the main process:
-     *  - 'tcpData': { data:number[] }
-     *  - 'tcpDisconnect': { disconnected:true, reason:'manual'|'remote'|'error', error? }
-     * Returns a handle with remove() for cleanup.
-     */
-    addListener(event, cb) {
-      const ch = `tcpclient:event:${event}`; // "tcpData" / "tcpDisconnect"
-      const handler = (_ev, payload) => { try { cb(payload); } catch { /* ignore */} };
-      ipcRenderer.on(ch, handler);
-      return { remove: () => ipcRenderer.removeListener(ch, handler) };
-    },
+        /**
+         * Configure logical read timeout used by writeAndRead.
+         * Accepts { readTimeout:number }.
+         */
+        async setReadTimeout(args) {
+          try {
+            const res = await ipcRenderer.invoke('tcpclient:setReadTimeout', { ...args, connectionId });
+            return hasStdShape(res) ? res : ok();
+          } catch (e) { return fail(e); }
+        },
 
-    /**
-     * Remove all known event listeners registered by this bridge.
-     * Useful during hot-reloads or when tearing down windows.
-     */
-    removeAllListeners() {
-      ipcRenderer.removeAllListeners('tcpclient:event:tcpData');
-      ipcRenderer.removeAllListeners('tcpclient:event:tcpDisconnect');
-      return Promise.resolve();
+        /**
+         * Request/Response helper: write bytes and wait for a reply.
+         * Accepts { data, timeout?, maxBytes?, expect?, suspendStreamDuringRR? }.
+         * Returns { error, errorMessage, data, bytesSent, bytesReceived, matched }.
+         */
+        async writeAndRead(args) {
+          try {
+            const res = await ipcRenderer.invoke('tcpclient:writeAndRead', { ...args, connectionId });
+            if (hasStdShape(res)) return res;
+            const data = res?.data || [];
+            const bytesSent = typeof res?.bytesSent === 'number' ? res.bytesSent : null;
+            const bytesReceived = typeof res?.bytesReceived === 'number' ? res.bytesReceived : data.length;
+            return ok({ data, bytesSent, bytesReceived, matched: !!res?.matched });
+          } catch (e) {
+            return fail(e, { data: [], bytesSent: null, bytesReceived: null, matched: false });
+          }
+        },
+
+        /**
+         * Subscribe to native events for this connection:
+         *  - 'tcpData':       { connectionId, data:number[] }
+         *  - 'tcpDisconnect': { connectionId, disconnected:true, reason:'manual'|'remote'|'error', error? }
+         *
+         * Only events matching this connection's connectionId are delivered.
+         * Returns a handle with remove() for cleanup.
+         */
+        addListener(event, cb) {
+          const ch = `tcpclient:event:${event}`;
+          const handler = (_ev, payload) => {
+            try {
+              if (payload?.connectionId === connectionId) cb(payload);
+            } catch { /* ignore renderer-side errors */ }
+          };
+          ipcRenderer.on(ch, handler);
+          if (!_handlers.has(event)) _handlers.set(event, []);
+          _handlers.get(event).push(handler);
+          return {
+            remove: () => {
+              ipcRenderer.removeListener(ch, handler);
+              const arr = _handlers.get(event);
+              if (arr) {
+                const idx = arr.indexOf(handler);
+                if (idx >= 0) arr.splice(idx, 1);
+              }
+            },
+          };
+        },
+
+        /**
+         * Remove all listeners registered via addListener on this connection.
+         * Does NOT affect listeners registered on other connections.
+         */
+        removeAllListeners() {
+          for (const [event, handlers] of _handlers.entries()) {
+            const ch = `tcpclient:event:${event}`;
+            for (const h of handlers) ipcRenderer.removeListener(ch, h);
+          }
+          _handlers.clear();
+          return Promise.resolve();
+        },
+
+        /**
+         * Disconnect, clean up all listeners, and release this connection
+         * from the main-process registry.
+         */
+        async destroy() {
+          try {
+            await this.removeAllListeners();
+            await ipcRenderer.invoke('tcpclient:destroyConnection', { connectionId });
+          } catch { /* ignore */ }
+        },
+      });
     },
   });
 };

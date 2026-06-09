@@ -1,17 +1,8 @@
 /**
- * Android bridge for the TCPClient Capacitor plugin.
+ * Android bridge for the TCPClient Capacitor plugin — multi-instance version.
  *
- * Responsibilities:
- * - Validate and map JS arguments to the core TCPClient APIs.
- * - Convert between JS arrays/objects and ByteArray efficiently.
- * - Event micro-batching: buffer small bursts and flush after ~10ms or when >=16KB.
- * - Uniform result objects: { error, errorMessage, ... } — no exceptions thrown across the bridge.
- * - writeAndRead: uses an efficient (ByteArray, usedLen) matcher to avoid temporary allocations.
- *
- * Behavior notes:
- * - startRead resets the batching state; stopRead flushes any pending data.
- * - setReadTimeout forwards to the Android core; on iOS this method is a no-op for API parity.
- * - Disconnect emits tcpDisconnect with reason: manual | remote | error.
+ * Each JS connectionId maps to its own TCPClient instance, delegate, and micro-batch buffer.
+ * TCPClient.kt (core) is untouched — only this bridge layer changed.
  */
 package com.devioarts.capacitor.tcpclient
 
@@ -21,230 +12,261 @@ import com.getcapacitor.PluginMethod
 import android.os.Handler
 import android.os.Looper
 import java.io.ByteArrayOutputStream
-/**
- * Android Capacitor bridge for TCPClient (strict API).
- * Updated to use (ByteArray, usedLen) matcher to avoid extra allocations.
- */
+import java.util.concurrent.ConcurrentHashMap
+
 @CapacitorPlugin(name = "TCPClient")
-class TCPClientPlugin : Plugin(), TCPClientDelegate {
+class TCPClientPlugin : Plugin() {
 
-    private val tcpClient = TCPClient()
-// iOS-like micro-batching: 10ms window / 16KB cap
-private val mergeWindowMs = 10
-private val mergeMaxBytes = 16 * 1024
-private val mainHandler = Handler(Looper.getMainLooper())
-private var pending = ByteArrayOutputStream()
-private val flushRunnable = Runnable { flushPendingNow() }
+    // MARK: - Per-connection state
 
-private fun flushPendingNow() {
-    mainHandler.removeCallbacks(flushRunnable)
-    val size = pending.size()
-    if (size > 0) {
-        val bytes = pending.toByteArray()
-        pending.reset()
-        notifyListeners("tcpData", JSObject().put("data", Helpers.bytesToJSArray(bytes)))
+    private inner class ConnState(val id: String) {
+        val delegate = ConnDelegate(id)
+        val client   = TCPClient().also { it.delegate = delegate }
+        val pending  = ByteArrayOutputStream()
+        val flushRunnable = Runnable { flushPendingNow(id) }
     }
-}
-private fun scheduleFlush() {
-    mainHandler.removeCallbacks(flushRunnable)
-    mainHandler.postDelayed(flushRunnable, mergeWindowMs.toLong())
-}
-    override fun load() {
-        tcpClient.delegate = this
+
+    /** Routes TCPClient callbacks back to the plugin with the matching connectionId. */
+    private inner class ConnDelegate(val id: String) : TCPClientDelegate {
+        override fun onReceive(data: ByteArray)                        = this@TCPClientPlugin.onReceive(id, data)
+        override fun onDisconnect(reason: TCPClient.DisconnectReason)  = this@TCPClientPlugin.onDisconnect(id, reason)
     }
+
+    private val connections  = ConcurrentHashMap<String, ConnState>()
+    private val mainHandler  = Handler(Looper.getMainLooper())
+    private val mergeWindowMs = 10L
+    private val mergeMaxBytes = 16 * 1024
+
+    // MARK: - Registry helpers
+
+    private fun getOrCreate(id: String): ConnState = connections.getOrPut(id) { ConnState(id) }
+
+    private fun requireId(call: PluginCall): String? {
+        val id = call.getString("connectionId")
+        if (id.isNullOrEmpty()) {
+            call.resolve(JSObject().put("error", true).put("errorMessage", "connectionId is required"))
+            return null
+        }
+        return id
+    }
+
+    // MARK: - API
 
     @PluginMethod
     fun connect(call: PluginCall) {
+        val id   = requireId(call) ?: return
         val host = call.getString("host")
         if (host.isNullOrEmpty()) {
             call.resolve(JSObject().put("error", true).put("errorMessage", "host is required").put("connected", false)); return
         }
-        val port = call.getInt("port") ?: 9100
+        val port      = call.getInt("port") ?: 9100
         if (port !in 1..65535) {
             call.resolve(JSObject().put("error", true).put("errorMessage", "invalid port").put("connected", false)); return
         }
-        val timeout = call.getInt("timeout") ?: 3000
-        val noDelay = call.getBoolean("noDelay") ?: true
-        val keepAlive = call.getBoolean("keepAlive") ?: true
+        val timeout   = call.getInt("timeout")         ?: 3000
+        val noDelay   = call.getBoolean("noDelay")     ?: true
+        val keepAlive = call.getBoolean("keepAlive")   ?: true
 
-        tcpClient.connect(host, port, timeout, noDelay, keepAlive) { res ->
+        getOrCreate(id).client.connect(host, port, timeout, noDelay, keepAlive) { res ->
             val obj = JSObject()
             if (res.isSuccess) obj.put("error", false).put("errorMessage", JSObject.NULL).put("connected", true)
-            else obj.put("error", true).put("errorMessage", "connect failed: ${res.exceptionOrNull()?.message}").put("connected", false)
+            else               obj.put("error", true).put("errorMessage", "connect failed: ${res.exceptionOrNull()?.message}").put("connected", false)
             bridge?.activity?.runOnUiThread { call.resolve(obj) }
         }
     }
 
     @PluginMethod
     fun disconnect(call: PluginCall) {
-        tcpClient.disconnect()
+        val id = requireId(call) ?: return
+        connections[id]?.let { state ->
+            state.client.disconnect()
+            bridge?.activity?.runOnUiThread { flushPendingNow(id) }
+        }
         call.resolve(JSObject().put("error", false).put("errorMessage", JSObject.NULL).put("disconnected", true).put("reading", false))
     }
 
     @PluginMethod
     fun isConnected(call: PluginCall) {
-        call.resolve(JSObject().put("error", false).put("errorMessage", JSObject.NULL).put("connected", tcpClient.isConnected()))
+        val id = requireId(call) ?: return
+        val connected = connections[id]?.client?.isConnected() ?: false
+        call.resolve(JSObject().put("error", false).put("errorMessage", JSObject.NULL).put("connected", connected))
     }
 
     @PluginMethod
     fun isReading(call: PluginCall) {
-        call.resolve(JSObject().put("error", false).put("errorMessage", JSObject.NULL).put("reading", tcpClient.isReading()))
+        val id = requireId(call) ?: return
+        val reading = connections[id]?.client?.isReading() ?: false
+        call.resolve(JSObject().put("error", false).put("errorMessage", JSObject.NULL).put("reading", reading))
     }
 
     @PluginMethod
     fun write(call: PluginCall) {
-        val jsArr = call.getArray("data")
-        val bytes: ByteArray? = when {
-            jsArr != null -> Helpers.jsArrayToBytes(jsArr)
-            else -> call.getObject("data")?.let { Helpers.jsonObjectToBytes(it) }
+        val id    = requireId(call) ?: return
+        val state = connections[id] ?: run {
+            call.resolve(JSObject().put("error", true).put("errorMessage", "not connected").put("bytesSent", 0)); return
         }
-        if (bytes == null) {
-            call.resolve(JSObject()
-                .put("error", true)
-                .put("errorMessage", "invalid data (expected number[] / Uint8Array)")
-                .put("bytesSent", 0))
-            return
+        val bytes = extractBytes(call) ?: run {
+            call.resolve(JSObject().put("error", true).put("errorMessage", "invalid data (expected number[] / Uint8Array)").put("bytesSent", 0)); return
         }
-
-        tcpClient.write(bytes) { res ->
+        state.client.write(bytes) { res ->
             val obj = JSObject()
             if (res.isSuccess) obj.put("error", false).put("errorMessage", null).put("bytesSent", res.getOrNull())
-            else obj.put("error", true).put("errorMessage", "write failed: ${res.exceptionOrNull()?.message}").put("bytesSent", 0)
+            else               obj.put("error", true).put("errorMessage", "write failed: ${res.exceptionOrNull()?.message}").put("bytesSent", 0)
             bridge?.activity?.runOnUiThread { call.resolve(obj) }
         }
     }
 
     @PluginMethod
     fun startRead(call: PluginCall) {
+        val id    = requireId(call) ?: return
+        val state = connections[id] ?: run {
+            call.resolve(JSObject().put("error", true).put("errorMessage", "not connected").put("reading", false)); return
+        }
         val chunk = call.getInt("chunkSize") ?: 4096
-        call.getInt("readTimeout")?.let { tcpClient.setReadTimeout(it) }
-        pending.reset()
-        mainHandler.removeCallbacks(flushRunnable)
-        tcpClient.startRead(chunk)
-        call.resolve(JSObject().put("error", false).put("errorMessage", JSObject.NULL).put("reading", tcpClient.isReading()))
+        call.getInt("readTimeout")?.let { state.client.setReadTimeout(it) }
+        bridge?.activity?.runOnUiThread {
+            mainHandler.removeCallbacks(state.flushRunnable)
+            state.pending.reset()
+        }
+        state.client.startRead(chunk)
+        call.resolve(JSObject().put("error", false).put("errorMessage", JSObject.NULL).put("reading", state.client.isReading()))
     }
 
     @PluginMethod
     fun stopRead(call: PluginCall) {
-        tcpClient.stopRead()
-        bridge?.activity?.runOnUiThread { flushPendingNow() }
+        val id = requireId(call) ?: return
+        connections[id]?.let { state ->
+            state.client.stopRead()
+            bridge?.activity?.runOnUiThread { flushPendingNow(id) }
+        }
         call.resolve(JSObject().put("error", false).put("errorMessage", JSObject.NULL).put("reading", false))
     }
 
     @PluginMethod
     fun setReadTimeout(call: PluginCall) {
+        val id = requireId(call) ?: return
         val ms = call.getInt("readTimeout") ?: 1000
-        tcpClient.setReadTimeout(ms)
+        connections[id]?.client?.setReadTimeout(ms)
         call.resolve(JSObject().put("error", false).put("errorMessage", JSObject.NULL))
     }
 
-    /**
-     * Write then read with timeout & optional pattern.
-     * Matcher receives (buffer, usedLen) and uses BMH over prefix without extra copies.
-     */
     @PluginMethod
-fun writeAndRead(call: PluginCall) {
-    val jsArr = call.getArray("data")
-    val bytes: ByteArray? = when {
-        jsArr != null -> Helpers.jsArrayToBytes(jsArr)
-        else -> call.getObject("data")?.let { Helpers.jsonObjectToBytes(it) }
-    }
-    if (bytes == null) {
-        call.resolve(
-            JSObject()
-                .put("error", true)
-                .put("errorMessage", "invalid data (expected number[] / Uint8Array)")
-                .put("bytesSent", 0)
-                .put("bytesReceived", 0)
-                .put("data", JSArray())
-                .put("matched", false)
-        )
-        return
-    }
-
-    val timeout = call.getInt("timeout") ?: 1000
-    val maxBytes = call.getInt("maxBytes") ?: 4096
-
-    var matcher: ((ByteArray, Int) -> Boolean)? = null
-    val expectStr = call.getString("expect")
-    if (!expectStr.isNullOrBlank()) {
-        val pat = Helpers.hexToBytes(expectStr)
-        if (pat == null) {
-            call.resolve(
-                JSObject().put("error", true).put("errorMessage", "invalid expect (hex)")
-                    .put("bytesSent", 0).put("bytesReceived", 0).put("data", JSArray()).put("matched", false)
-            )
-            return
+    fun writeAndRead(call: PluginCall) {
+        val id    = requireId(call) ?: return
+        val state = connections[id] ?: run {
+            call.resolve(JSObject().put("error", true).put("errorMessage", "not connected")
+                .put("bytesSent", 0).put("bytesReceived", 0).put("data", JSArray()).put("matched", false)); return
         }
-        matcher = { buf, used -> Helpers.indexOfRange(buf, used, pat) >= 0 }
-    } else {
-        val expectArr = call.getArray("expect")
-        if (expectArr != null) {
-            val pat = Helpers.jsArrayToBytes(expectArr)
-            if (pat == null) {
-                call.resolve(
-                    JSObject().put("error", true).put("errorMessage", "invalid expect (number[])")
-                        .put("bytesSent", 0).put("bytesReceived", 0).put("data", JSArray()).put("matched", false)
-                )
-                return
+        val bytes = extractBytes(call) ?: run {
+            call.resolve(JSObject().put("error", true).put("errorMessage", "invalid data (expected number[] / Uint8Array)")
+                .put("bytesSent", 0).put("bytesReceived", 0).put("data", JSArray()).put("matched", false)); return
+        }
+
+        val timeout   = call.getInt("timeout")   ?: 1000
+        val maxBytes  = call.getInt("maxBytes")  ?: 4096
+        val suspendRR = call.getBoolean("suspendStreamDuringRR") ?: true
+
+        var matcher: ((ByteArray, Int) -> Boolean)? = null
+        val expectStr = call.getString("expect")
+        if (!expectStr.isNullOrBlank()) {
+            val pat = Helpers.hexToBytes(expectStr) ?: run {
+                call.resolve(JSObject().put("error", true).put("errorMessage", "invalid expect (hex)")
+                    .put("bytesSent", 0).put("bytesReceived", 0).put("data", JSArray()).put("matched", false)); return
             }
             matcher = { buf, used -> Helpers.indexOfRange(buf, used, pat) >= 0 }
-        }
-    }
-
-    val suspendRR = call.getBoolean("suspendStreamDuringRR") ?: true
-    tcpClient.writeAndRead(bytes, timeout, maxBytes, matcher, suspendRR) { res ->
-        val obj = JSObject()
-        if (res.isSuccess) {
-            val rr = res.getOrNull()!! // ReadResult
-            obj.put("error", false)
-                .put("errorMessage", JSObject.NULL)
-                .put("bytesSent", bytes.size)
-                .put("bytesReceived", rr.data.size)
-                .put("data", Helpers.bytesToJSArray(rr.data))
-                .put("matched", rr.matched)
         } else {
-            val ex = res.exceptionOrNull()
-            val timedOut = ex is TCPClient.TcpError.ConnectTimeout
-            obj.put("error", true)
-                .put("errorMessage", "writeAndRead failed: ${ex?.message}")
-                .put("bytesSent", if (timedOut) bytes.size else 0)
-                .put("bytesReceived", 0)
-                .put("data", JSArray())
-                .put("matched", false)
+            val expectArr = call.getArray("expect")
+            if (expectArr != null) {
+                val pat = Helpers.jsArrayToBytes(expectArr) ?: run {
+                    call.resolve(JSObject().put("error", true).put("errorMessage", "invalid expect (number[])")
+                        .put("bytesSent", 0).put("bytesReceived", 0).put("data", JSArray()).put("matched", false)); return
+                }
+                matcher = { buf, used -> Helpers.indexOfRange(buf, used, pat) >= 0 }
+            }
         }
-        bridge?.activity?.runOnUiThread { call.resolve(obj) }
-    }
-}
 
-
-    // --- Native → JS events ---
-
-override fun onReceive(data: ByteArray) {
-    // Micro-batch on the main thread
-    bridge?.activity?.runOnUiThread {
-        pending.write(data)
-        if (pending.size() >= mergeMaxBytes) {
-            flushPendingNow()
-        } else {
-            scheduleFlush()
+        state.client.writeAndRead(bytes, timeout, maxBytes, matcher, suspendRR) { res ->
+            val obj = JSObject()
+            if (res.isSuccess) {
+                val rr = res.getOrNull()!!
+                obj.put("error", false).put("errorMessage", JSObject.NULL)
+                    .put("bytesSent", bytes.size).put("bytesReceived", rr.data.size)
+                    .put("data", Helpers.bytesToJSArray(rr.data)).put("matched", rr.matched)
+            } else {
+                val ex = res.exceptionOrNull()
+                val timedOut = ex is TCPClient.TcpError.ConnectTimeout
+                obj.put("error", true).put("errorMessage", "writeAndRead failed: ${ex?.message}")
+                    .put("bytesSent", if (timedOut) bytes.size else 0).put("bytesReceived", 0)
+                    .put("data", JSArray()).put("matched", false)
+            }
+            bridge?.activity?.runOnUiThread { call.resolve(obj) }
         }
     }
-}
 
-    override fun onDisconnect(reason: TCPClient.DisconnectReason) {
-        bridge?.activity?.runOnUiThread { flushPendingNow() }
-        val payload = JSObject().put("disconnected", true).put("reading", false)
+    @PluginMethod
+    fun destroyConnection(call: PluginCall) {
+        val id = call.getString("connectionId") ?: run { call.resolve(); return }
+        connections.remove(id)?.let { state ->
+            mainHandler.removeCallbacks(state.flushRunnable)
+            state.client.dispose()
+        }
+        call.resolve()
+    }
+
+    // MARK: - Delegate callbacks
+
+    private fun onReceive(id: String, data: ByteArray) {
+        bridge?.activity?.runOnUiThread {
+            val state = connections[id] ?: return@runOnUiThread
+            state.pending.write(data)
+            if (state.pending.size() >= mergeMaxBytes) {
+                flushPendingNow(id)
+            } else {
+                mainHandler.removeCallbacks(state.flushRunnable)
+                mainHandler.postDelayed(state.flushRunnable, mergeWindowMs)
+            }
+        }
+    }
+
+    private fun onDisconnect(id: String, reason: TCPClient.DisconnectReason) {
+        bridge?.activity?.runOnUiThread { flushPendingNow(id) }
+        val payload = JSObject().put("connectionId", id).put("disconnected", true).put("reading", false)
         when (reason) {
             is TCPClient.DisconnectReason.Manual -> payload.put("reason", "manual")
             is TCPClient.DisconnectReason.Remote -> payload.put("reason", "remote")
-            is TCPClient.DisconnectReason.Error -> {
-                payload.put("reason", "error")
-                payload.put("error", reason.error.message ?: "error")
-            }
+            is TCPClient.DisconnectReason.Error  -> payload.put("reason", "error").put("error", reason.error.message ?: "error")
         }
         bridge?.activity?.runOnUiThread { notifyListeners("tcpDisconnect", payload) }
     }
 
-    override fun handleOnDestroy() { tcpClient.dispose() }
+    // MARK: - Helpers
+
+    private fun flushPendingNow(id: String) {
+        val state = connections[id] ?: return
+        mainHandler.removeCallbacks(state.flushRunnable)
+        val size = state.pending.size()
+        if (size > 0) {
+            val bytes = state.pending.toByteArray()
+            state.pending.reset()
+            notifyListeners("tcpData", JSObject()
+                .put("connectionId", id)
+                .put("data", Helpers.bytesToJSArray(bytes)))
+        }
+    }
+
+    private fun extractBytes(call: PluginCall): ByteArray? {
+        val jsArr = call.getArray("data")
+        return when {
+            jsArr != null -> Helpers.jsArrayToBytes(jsArr)
+            else          -> call.getObject("data")?.let { Helpers.jsonObjectToBytes(it) }
+        }
+    }
+
+    override fun handleOnDestroy() {
+        connections.values.forEach { state ->
+            mainHandler.removeCallbacks(state.flushRunnable)
+            state.client.dispose()
+        }
+        connections.clear()
+    }
 }
