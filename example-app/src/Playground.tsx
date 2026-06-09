@@ -1,5 +1,6 @@
 import React, {useRef, useState} from "react";
 import { TCPClient } from "@devioarts/capacitor-tcpclient";
+import type { TCPConnection } from "@devioarts/capacitor-tcpclient";
 import { useLogger } from "./components/Logger.tsx";
 import { Button } from "./components/Button.tsx";
 import { Input, Label, TextArea } from "./components/Input.tsx";
@@ -54,83 +55,87 @@ export const TcpPlayground: React.FC = () => {
 	const [expectHex, setExpectHex] = React.useState("0a");
 	const [expectArr, setExpectArr] = React.useState("10,13");
 
-	// Ref keeps the current connectionId accessible inside event callbacks
-	// without re-registering the listeners on every keystroke.
-	const connIdRef = useRef(connectionId);
-	React.useEffect(() => { connIdRef.current = connectionId; }, [connectionId]);
+	// Current connection instance (non-reactive — doesn't need to trigger re-render)
+	const connRef = useRef<TCPConnection | null>(null);
 
-	const onData = (ev: any) => {
-		if (ev?.connectionId !== connIdRef.current) return;
-		const a: number[] = ev?.data ?? [];
-		log.info(`listener`,`tcpData <- ${a.length} bytes`, a.slice(0, 13));
-	};
-	const onDisconnect = (ev: any) => {
-		if (ev?.connectionId !== connIdRef.current) return;
-		log.warn(`listener`,`tcpDisconnect [${ev.connectionId}]: ${ev?.reason ?? "?"} ${ev?.error ?? ""}`);
-		setConnected(false);
-		setReading(false);
-	};
+	/** Returns the existing instance for the current connectionId, or creates a new one. */
+	function getConn(): TCPConnection {
+		const c = TCPClient.createConnection({ connectionId });
+		connRef.current = c;
+		return c;
+	}
 
 
 	const startListening = async () => {
 		if (listenings) {
-			log.warn(`client`,"startListening - already listening, ignoring");
+			log.warn(`client`, "startListening - already listening, ignoring");
 			return;
 		}
-		const r1 = await TCPClient.addListener("tcpData", onData);
-		log.info(`client`,"startListening(tcpData)", r1);
-		const r2 = await TCPClient.addListener("tcpDisconnect", onDisconnect);
-		log.info(`client`,"startListening(tcpDisconnect)", r2);
+		const conn = getConn();
+		// conn.addListener already filters events by connectionId internally
+		await conn.addListener("tcpData", (ev) => {
+			log.info(`listener`, `tcpData <- ${ev.data.length} bytes`, ev.data.slice(0, 13));
+		});
+		await conn.addListener("tcpDisconnect", (ev) => {
+			log.warn(`listener`, `tcpDisconnect: ${ev.reason} ${ev.error ?? ""}`);
+			setConnected(false);
+			setReading(false);
+		});
+		log.info(`client`, "startListening(tcpData, tcpDisconnect)");
 		setListenings(true);
 	};
 
 	const stopListening = async () => {
 		if (!listenings) {
-			log.warn(`client`,"stopListening - not listening, ignoring");
+			log.warn(`client`, "stopListening - not listening, ignoring");
 			return;
 		}
-		const r = await TCPClient.removeAllListeners();
-		log.info(`client`,"stopListening()", r);
+		await connRef.current?.removeAllListeners();
+		log.info(`client`, "stopListening()");
 		setListenings(false);
 	};
 
 
 	// Actions
 	const doConnect = async () => {
-		const r = await TCPClient.connect({ connectionId, host, port, timeout: connTimeout, noDelay, keepAlive });
+		// createConnection sets host/port/... as defaults for connect()
+		const conn = TCPClient.createConnection({ connectionId });
+		connRef.current = conn;
+		const r = await conn.connect({ host, port, timeout: connTimeout, noDelay, keepAlive });
 		setConnected(!r.error && !!r.connected);
-		log.info(`client`,"connect()", r);
+		log.info(`client`, "connect()", r);
 	};
 	const doDisconnect = async () => {
-		const r = await TCPClient.disconnect({ connectionId });
+		const r = await getConn().disconnect();
 		setConnected(false); setReading(false);
-		log.info(`client`,"disconnect()", r);
+		log.info(`client`, "disconnect()", r);
 	};
 	const doDestroy = async () => {
-		await TCPClient.destroyConnection({ connectionId });
-		setConnected(false); setReading(false);
-		log.info(`client`,"destroyConnection()", { connectionId });
+		await getConn().destroy();
+		connRef.current = null;
+		setConnected(false); setReading(false); setListenings(false);
+		log.info(`client`, "destroy()", { connectionId });
 	};
 	const doStatus = async () => {
-		const r = await TCPClient.isConnected({ connectionId });
+		const r = await getConn().isConnected();
 		setConnected(!!r.connected);
-		log.info(`client`,"isConnected()", r);
+		log.info(`client`, "isConnected()", r);
 	};
 	const doStatusReading = async () => {
-		const r = await TCPClient.isReading({ connectionId });
+		const r = await getConn().isReading();
 		setReading(!!r.reading);
-		log.info(`client`,"isReading()", r);
+		log.info(`client`, "isReading()", r);
 	};
 	const startRead = async () => {
-		await TCPClient.setReadTimeout({ connectionId, readTimeout: readerTimeout });
-		const r = await TCPClient.startRead({ connectionId, chunkSize, readTimeout: readerTimeout });
+		await getConn().setReadTimeout({ readTimeout: readerTimeout });
+		const r = await getConn().startRead({ chunkSize, readTimeout: readerTimeout });
 		setReading(!r.error);
-		log.info(`stream`,"startRead()", r);
+		log.info(`stream`, "startRead()", r);
 	};
 	const stopRead = async () => {
-		const r = await TCPClient.stopRead({ connectionId });
+		const r = await getConn().stopRead();
 		setReading(false);
-		log.info(`stream`,"stopRead()", r);
+		log.info(`stream`, "stopRead()", r);
 	};
 
 	const doWrite = async () => {
@@ -145,10 +150,10 @@ export const TcpPlayground: React.FC = () => {
 				if (nums.some(n => Number.isNaN(n))) throw new Error("Invalid array");
 				data = nums.map(n => n & 0xff);
 			}
-			const r = await TCPClient.write({ connectionId, data });
-			log.info(`write`,`write(${data.length})`, r);
+			const r = await getConn().write({ data });
+			log.info(`write`, `write(${data.length})`, r);
 		} catch (e: any) {
-			log.error(`write`,"write() failed", e?.message ?? e);
+			log.error(`write`, "write() failed", e?.message ?? e);
 		}
 	};
 
@@ -163,10 +168,10 @@ export const TcpPlayground: React.FC = () => {
 				if (nums.some(n => Number.isNaN(n))) throw new Error("Invalid expect array");
 				expect = nums.map(n => n & 0xff);
 			}
-			const r = await TCPClient.writeAndRead({ connectionId, data, timeout, maxBytes, expect, suspendStreamDuringRR: suspend });
-			log.info(`rr`,`RR: bytesRead=${(r as any)?.bytesRead ?? 0} error=${(r as any)?.error ? "yes" : "no"}`, r);
+			const r = await getConn().writeAndRead({ data, timeout, maxBytes, expect, suspendStreamDuringRR: suspend });
+			log.info(`rr`, `RR: bytesReceived=${r.bytesReceived} matched=${r.matched} error=${r.error}`, r);
 		} catch (e: any) {
-			log.error(`rr`,"writeAndRead() failed", e?.message ?? e);
+			log.error(`rr`, "writeAndRead() failed", e?.message ?? e);
 		}
 	};
 
@@ -258,7 +263,7 @@ export const TcpPlayground: React.FC = () => {
 			)}
 
 			{/* Request/Response */}
-			{active === "rr" && (
+			{active === "rr"&& (
 				<section className="border border-slate-200 rounded-lg p-4 space-y-3">
 					<h3 className="font-semibold">Request / Response</h3>
 					<div className="grid sm:grid-cols-2 lg:grid-cols-2 gap-3">

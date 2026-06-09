@@ -1,6 +1,6 @@
 {
   "name": "@devioarts/capacitor-tcpclient",
-  "version": "0.0.3",
+  "version": "0.0.4",
   "description": "TCP Client for Capacitor working on Android, iOS and Electron",
   "keywords": [
     "capacitor",
@@ -69,7 +69,7 @@
     "swiftlint": "2.0.0",
     "typescript": "6.0.3",
     "typescript-eslint": "8.61.0",
-    "electron": "42.3.3"
+    "electron": "42.4.0"
   },
   "peerDependencies": {
     "@capacitor/core": ">=8.0.0"

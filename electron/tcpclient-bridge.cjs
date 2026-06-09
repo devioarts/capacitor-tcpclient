@@ -33,11 +33,96 @@ module.exports.createTCPClientAPI = ({ ipcRenderer }) => {
    */
   const hasStdShape = (x) => x && typeof x === 'object' && typeof x.error === 'boolean' && 'errorMessage' in x;
 
+  // ---------------------------------------------------------------------------
+  // Flat API — used by the Capacitor web layer (web.ts) which passes connectionId
+  // explicitly in every call. Filtering by connectionId is done by index.ts, not here.
+  // ---------------------------------------------------------------------------
+
+  const _invoke = (channel, args) => ipcRenderer.invoke(channel, args);
+
+  const flatApi = {
+    async connect(args) {
+      try {
+        const res = await _invoke('tcpclient:connect', args);
+        return hasStdShape(res) ? res : ok({ connected: !!(res?.connected) });
+      } catch (e) { return fail(e, { connected: false }); }
+    },
+    async disconnect(args) {
+      try {
+        const res = await _invoke('tcpclient:disconnect', args);
+        return hasStdShape(res) ? res : ok({ disconnected: true, reading: false });
+      } catch (e) { return fail(e, { disconnected: false }); }
+    },
+    async isConnected(args) {
+      try {
+        const res = await _invoke('tcpclient:isConnected', args);
+        return hasStdShape(res) ? res : ok({ connected: !!(res?.connected) });
+      } catch (e) { return fail(e, { connected: false }); }
+    },
+    async isReading(args) {
+      try {
+        const res = await _invoke('tcpclient:isReading', args);
+        return hasStdShape(res) ? res : ok({ reading: !!(res?.reading) });
+      } catch (e) { return fail(e, { reading: false }); }
+    },
+    async write(args) {
+      try {
+        const res = await _invoke('tcpclient:write', args);
+        return hasStdShape(res) ? res : ok({ bytesSent: +res?.bytesSent || 0 });
+      } catch (e) { return fail(e, { bytesSent: 0 }); }
+    },
+    async startRead(args) {
+      try {
+        const res = await _invoke('tcpclient:startRead', args);
+        return hasStdShape(res) ? res : ok({ reading: true });
+      } catch (e) { return fail(e, { reading: false }); }
+    },
+    async stopRead(args) {
+      try {
+        const res = await _invoke('tcpclient:stopRead', args);
+        return hasStdShape(res) ? res : ok({ reading: false });
+      } catch (e) { return fail(e, { reading: true }); }
+    },
+    async setReadTimeout(args) {
+      try {
+        const res = await _invoke('tcpclient:setReadTimeout', args);
+        return hasStdShape(res) ? res : ok();
+      } catch (e) { return fail(e); }
+    },
+    async writeAndRead(args) {
+      try {
+        const res = await _invoke('tcpclient:writeAndRead', args);
+        if (hasStdShape(res)) return res;
+        const data = res?.data || [];
+        return ok({ data, bytesSent: res?.bytesSent ?? null, bytesReceived: res?.bytesReceived ?? data.length, matched: !!res?.matched });
+      } catch (e) { return fail(e, { data: [], bytesSent: null, bytesReceived: null, matched: false }); }
+    },
+    async destroyConnection(args) {
+      try { await _invoke('tcpclient:destroyConnection', args); } catch { /* ignore */ }
+    },
+    // Global listener — no connectionId filter here; index.ts _TCPConnection wraps the
+    // callback and filters by connectionId before delivering to the caller.
+    addListener(event, cb) {
+      const ch = `tcpclient:event:${event}`;
+      const handler = (_ev, payload) => { try { cb(payload); } catch { } };
+      ipcRenderer.on(ch, handler);
+      return { remove: () => ipcRenderer.removeListener(ch, handler) };
+    },
+    removeAllListeners() {
+      // Individual remove() calls (from PluginListenerHandle) handle cleanup.
+      return Promise.resolve();
+    },
+  };
+
   return Object.freeze({
+    // Flat API (Capacitor web.ts path) — spread first so createConnection can override nothing
+    ...flatApi,
+
     /**
      * Create a connection-scoped API for a given connectionId.
      * All methods automatically include connectionId in their IPC payloads.
      * addListener delivers only events that belong to this connection.
+     * Use this in renderer-only Electron apps (without Capacitor).
      */
     createConnection(connectionId) {
       // Track per-connection listeners so removeAllListeners is scoped.

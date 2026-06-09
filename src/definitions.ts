@@ -1,6 +1,6 @@
 import type { PluginListenerHandle } from '@capacitor/core';
 
-/**
+/*
  * Capacitor TCP client — public TypeScript API surface.
  *
  * Key concepts:

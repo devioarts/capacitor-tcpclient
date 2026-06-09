@@ -6,12 +6,12 @@ import * as path from 'path';
 import express from 'express';
 import type { AddressInfo } from 'net';
 // THIS IS IMPORTANT FOR PLUGING!
-import {TCPClientManager} from "@devioarts/capacitor-tcpclient/electron/tcpclient";
+import {TCPClient} from "@devioarts/capacitor-tcpclient/electron/tcpclient";
 
 
 const isDev = !app.isPackaged;
 // THIS IS IMPORTANT FOR PLUGIN!
-let tcpClient: TCPClientManager | null = null;
+let tcpClient: TCPClient | null = null;
 
 /*
  * Function to start a local HTTP server using express
@@ -41,7 +41,7 @@ function createWindow() {
 		},
 	});
 	// THIS IS IMPORTANT FOR PLUGIN!
-	tcpClient = new TCPClientManager(win);
+	tcpClient = new TCPClient(win);
 
 	if (isDev) {
 		win.loadURL('http://localhost:6001');

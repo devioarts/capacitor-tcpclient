@@ -1,6 +1,6 @@
 # @devioarts/capacitor-tcpclient
 
-TCP Client for Capacitor with iOS/Android/Electron support - [Example App](https://github.com/devioarts/capacitor-examples/tree/main/capacitor-tcpclient)
+TCP Client for Capacitor with iOS/Android/Electron support
 
 ## Install
 
@@ -36,10 +36,10 @@ npx cap sync
 ```typescript
 // ...
 // THIS LINE IS IMPORTANT FOR PLUGIN!
-import { TCPClientManager } from "@devioarts/capacitor-tcpclient/electron/tcpclient";
+import { TCPClient } from "@devioarts/capacitor-tcpclient/electron/tcpclient";
 // ...
 // THIS LINE IS IMPORTANT FOR PLUGIN!
-let tcpClientManager: TCPClientManager | null = null;
+let tcpClient: TCPClient | null = null;
 // ...
 function createWindow() {
   const win = new BrowserWindow(
@@ -47,7 +47,7 @@ function createWindow() {
   );
   // ...
   // THIS LINE IS IMPORTANT FOR PLUGIN!
-  tcpClientManager = new TCPClientManager(win);
+  tcpClient = new TCPClient(win);
   // ...
 }
 // ...
@@ -73,9 +73,9 @@ const conn = window.TCPClient.createConnection(crypto.randomUUID());
 await conn.connect({ host: '192.168.1.100', port: 9100 });
 
 // stream
+await conn.addListener('tcpData', ({ data }) => console.log('RX:', data));
+await conn.addListener('tcpDisconnect', ({ reason }) => console.log('disconnected:', reason));
 await conn.startRead({ chunkSize: 4096 });
-conn.addListener('tcpData', ({ data }) => console.log('RX:', data));
-conn.addListener('tcpDisconnect', ({ reason }) => console.log('disconnected:', reason));
 
 // RR
 const rr = await conn.writeAndRead({ data: [0x1b, 0x40], timeout: 1000 });
@@ -92,10 +92,10 @@ await conn.destroy();
 - **Request/Response (`writeAndRead`)**
     - Without `expect`: returns after **until-idle** (adaptive ~50–200 ms) to capture the full reply.
     - With `expect`: returns on first match. If `timeout` expires and **some data arrived**, returns **success** with `matched:false`; if **no data** arrived, returns a **timeout error**.
-- **Timeouts:** `timeout` is the total RR budget. `readTimeout` exists only on **Android** (continuous reader); on iOS/Electron it’s a no-op for API parity.
+- **Timeouts:** `timeout` is the total RR budget. `readTimeout` on **Android** sets `SO_TIMEOUT` on the continuous reader. On **iOS** it’s a no-op. On **Electron** it sets the default `timeout` used by `writeAndRead` when no explicit `timeout` is passed.
 - **Streaming (`tcpData` events):** micro-batched **every 10 ms or 16 KB**; on Electron the batch is split by your `chunkSize` before it’s sent to the web layer.
 - **Bytes & flags:** `bytesSent` = actually written; on RR timeout it remains the request length, on other errors it’s `0`. `bytesReceived` = length of returned `data`. `matched` = whether `expect` was found.
-- **Connectivity (`tcpIsConnected`)**: fast socket check. If RR/stream is running it returns `true`; otherwise it performs an active peek/EOF check and emits `tcpDisconnect` on remote close.
+- **Connectivity (`isConnected()`)**: fast socket check. If RR/stream is running it returns `true`; otherwise it performs an active peek/EOF check and emits `tcpDisconnect` on remote close.
 - **Stream suspension:** `suspendStreamDuringRR` (default **true**) temporarily detaches streaming so the RR read can’t be “stolen” by the stream consumer.
 - **Security:** plain **TCP** only (no TLS). Use an external TLS terminator (e.g., stunnel) if you need TLS.
 
@@ -103,7 +103,7 @@ await conn.destroy();
 
 - **Why “until-idle” without `expect`?** Many devices reply in fragments; a short adaptive idle window (~50–200 ms) avoids cutting responses.
 - **Why success on `expect` + timeout (with data)?** To avoid dropping partial replies; `matched:false` tells you the pattern didn’t occur.
-- **Why `readTimeout` only on Android?** Android `Socket` uses blocking I/O where `SO_TIMEOUT` matters; iOS/Electron use evented reads.
+- **Why does `readTimeout` behave differently per platform?** On Android, `SO_TIMEOUT` applies to the blocking stream reader. On iOS, evented reads make it a no-op. On Electron, it sets the default `timeout` for `writeAndRead` — the stream reader itself runs continuously without a timeout.
 
 ## Minimal usage (recap)
 
@@ -116,13 +116,14 @@ const conn = TCPClient.createConnection({ host: '192.168.1.100', port: 9100, tim
 await conn.connect();
 
 // stream (micro-batch 10 ms / 16 KB; split by chunkSize on Electron)
-await conn.startRead({ chunkSize: 4096 });
-conn.addListener('tcpData', ({ data }) => {
+// Register listeners before startRead so no events are missed
+await conn.addListener('tcpData', ({ data }) => {
   console.log('RX:', data.length);
 });
-conn.addListener('tcpDisconnect', ({ reason }) => {
+await conn.addListener('tcpDisconnect', ({ reason }) => {
   console.log('disconnected:', reason);
 });
+await conn.startRead({ chunkSize: 4096 });
 
 // RR
 const rr = await conn.writeAndRead({
@@ -212,21 +213,6 @@ Each instance has its own socket, event listeners, and lifecycle.
 
 
 #### TcpConnectOptions
-
-Capacitor TCP client — public TypeScript API surface.
-
-Key concepts:
-- Multi-connection model: each TCPClient.createConnection() call returns an isolated
-  <a href="#tcpconnection">TCPConnection</a> instance with its own socket, listener set, and lifecycle.
-- If the same connectionId is passed to createConnection() more than once, the existing
-  instance is returned from the registry (no new socket is opened).
-- Two data paths per connection:
-  1) Stream reader (startRead/stopRead) that emits tcpData events.
-  2) Request/Response (writeAndRead) with timeout, optional byte-pattern matching, and a cap.
-- Event micro-batching: platforms buffer short bursts and flush every ~10ms or when ~16KB
-  accumulates. Each event carries connectionId so the JS layer can route it.
-- Defaults: port=9100, connect timeout=3000ms, stream chunkSize=4096 bytes,
-  RR timeout=1000ms, RR maxBytes=4096, TCP_NODELAY=true, SO_KEEPALIVE=true.
 
 | Prop            | Type                 | Description                                                            |
 | --------------- | -------------------- | ---------------------------------------------------------------------- |

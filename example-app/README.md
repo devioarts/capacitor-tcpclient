@@ -79,11 +79,11 @@ npm run cap:open-ios
 
 ## Electron
 
-The main process uses `TCPClientManager` from the plugin:
+The main process uses `TCPClient` from the plugin:
 ```ts
-import { TCPClientManager } from "@devioarts/capacitor-tcpclient/electron/tcpclient";
+import { TCPClient } from "@devioarts/capacitor-tcpclient/electron/tcpclient";
 
-const tcpClient = new TCPClientManager(win);
+const tcpClient = new TCPClient(win);
 ```
 
 The preload exposes the bridge via `contextBridge`:

@@ -108,10 +108,10 @@ const MERGE_WINDOW_MS = 10;
 const MERGE_MAX_BYTES = 16 * 1024;
 
 // ---------------------------------------------------------------------------
-// TCPClientManager
+// TCPClient
 // ---------------------------------------------------------------------------
 
-export class TCPClientManager {
+export class TCPClient {
   private win: BrowserWindow;
   private conns = new Map<string, SocketState>();
 
@@ -252,9 +252,10 @@ export class TCPClientManager {
                 reason: 'error',
                 error: 'socket closed with error',
                 disconnected: true,
+                reading: false,
               });
             } else {
-              this.sendEvent(connectionId, 'tcpDisconnect', { reason: 'remote', disconnected: true });
+              this.sendEvent(connectionId, 'tcpDisconnect', { reason: 'remote', disconnected: true, reading: false });
             }
           };
           s.once('close', st.onClose);
@@ -287,7 +288,7 @@ export class TCPClientManager {
       } catch {
         /* ignore */
       }
-      this.sendEvent(connectionId, 'tcpDisconnect', { reason: 'manual', disconnected: true });
+      this.sendEvent(connectionId, 'tcpDisconnect', { reason: 'manual', disconnected: true, reading: false });
     }
     return ok({ disconnected: true, reading: false });
   }
@@ -459,7 +460,7 @@ export class TCPClientManager {
         st.rrInFlight = false;
 
         if (err) {
-          const isTimeout = err === 'connect timeout';
+          const isTimeout = err === 'timeout';
           resolve(fail(err, { data: [], bytesSent: isTimeout ? bytesSent : 0, bytesReceived: 0, matched: false }));
         } else {
           const resBuf = (out ?? Buffer.alloc(0)).subarray(0, cap);
@@ -514,7 +515,7 @@ export class TCPClientManager {
           matched = false;
           finish(out);
         } else {
-          finish(null, 'connect timeout');
+          finish(null, 'timeout');
         }
       }, timeout);
 
