@@ -30,47 +30,73 @@ npx cap sync
 ```
 ---
 ## ElectronJS
-> Implementation example was developed on [capacitor-electron](https://github.com/devioarts/capacitor-examples/tree/main/capacitor-electron)
-> base, if you run electron differently, you may need to adjust the code.
-#### /electron/main.ts
+
+The plugin ships a native IPC bridge for Electron.  Integration requires two
+auto-generated runtime files — one for the **main process** and one for the
+**preload script** — which wire the plugin's IPC channels to the renderer.
+
+> If you are using the [capacitor-electron](https://github.com/devioarts/capacitor-examples/tree/main/capacitor-electron)
+> project template, run `npm run update` inside your `electron/` directory to
+> regenerate these files automatically from the plugin's
+> `@devioarts/capacitor-tcpclient/electron/settings` metadata.
+
+### Main process (`electron/src/rt/electron-main.ts`)
+
 ```typescript
-// ...
-// THIS LINE IS IMPORTANT FOR PLUGIN!
-import { TCPClient } from "@devioarts/capacitor-tcpclient/electron/tcpclient";
-// ...
-// THIS LINE IS IMPORTANT FOR PLUGIN!
-let tcpClient: TCPClient | null = null;
-// ...
-function createWindow() {
-  const win = new BrowserWindow(
-    // ...
-  );
-  // ...
-  // THIS LINE IS IMPORTANT FOR PLUGIN!
-  tcpClient = new TCPClient(win);
-  // ...
+// Auto-generated — do not edit. Regenerate with: npm run update
+import { app, ipcMain } from 'electron';
+import { TCPClient } from '@devioarts/capacitor-tcpclient/electron';
+
+type AnyRecord = Record<string, unknown>;
+
+function registerPlugin(pluginClass: string, instance: AnyRecord, methods: readonly string[]) {
+  for (const method of methods) {
+    ipcMain.handle(`${pluginClass}-${method}`, async (_event, opts: unknown) => {
+      try {
+        return await (instance[method] as (opts: AnyRecord) => Promise<unknown>)((opts ?? {}) as AnyRecord);
+      } catch (err) {
+        return { error: true, errorMessage: err instanceof Error ? err.message : String(err) };
+      }
+    });
+  }
 }
-// ...
+
+void (async () => {
+  await app.whenReady();
+  registerPlugin('TCPClient', new TCPClient() as unknown as AnyRecord, [
+    'getPlatform', 'connect', 'disconnect', 'isConnected', 'isReading',
+    'write', 'startRead', 'stopRead', 'setReadTimeout', 'writeAndRead', 'destroyConnection',
+  ]);
+})();
 ```
 
-#### electron/preload.cjs
-```javascript
-const { contextBridge, ipcRenderer } = require("electron");
+Import this file from your `electron/main.ts`:
 
-// THIS LINE IS IMPORTANT FOR PLUGIN!
-const { createTCPClientAPI } = require("@devioarts/capacitor-tcpclient/electron/tcpclient-bridge.cjs");
-// ...
-// THIS LINE IS IMPORTANT FOR PLUGIN!
-contextBridge.exposeInMainWorld('TCPClient', createTCPClientAPI({ ipcRenderer }));
-// ...
-```
-
-#### renderer (Electron-only, without Capacitor)
 ```typescript
-// Each connection needs a unique ID — generate one with crypto.randomUUID() or any UUID lib.
-const conn = window.TCPClient.createConnection(crypto.randomUUID());
+import './src/rt/electron-main';
+```
 
-await conn.connect({ host: '192.168.1.100', port: 9100 });
+### Preload (`electron/src/rt/electron-rt.ts`)
+
+The preload runtime exposes `CapacitorCustomPlatform` to the renderer via
+`contextBridge`, mapping each method to `ipcRenderer.invoke` and routing
+events from `ipcRenderer.on`.
+
+```typescript
+// electron/preload.ts
+import './src/rt/electron-rt';
+```
+
+See the [example project](https://github.com/devioarts/capacitor-examples) for
+the full `electron-rt.ts` and `electron-plugins.ts` sources.
+
+### Renderer (using the `@capacitor/core` JS API)
+
+```typescript
+import { TCPClient } from '@devioarts/capacitor-tcpclient';
+
+const conn = TCPClient.createConnection({ host: '192.168.1.100', port: 9100 });
+await conn.connect();
 
 // stream
 await conn.addListener('tcpData', ({ data }) => console.log('RX:', data));
@@ -88,14 +114,14 @@ await conn.destroy();
 
 ## Technical behavior & guarantees
 
-- **Platforms:** iOS / Android / Electron — same API and return shapes.
+- **Platforms:** iOS / Android / Electron provide real TCP sockets. The Web implementation is a development stub with the same API shape but no real TCP transport.
 - **Request/Response (`writeAndRead`)**
     - Without `expect`: returns after **until-idle** (adaptive ~50–200 ms) to capture the full reply.
     - With `expect`: returns on first match. If `timeout` expires and **some data arrived**, returns **success** with `matched:false`; if **no data** arrived, returns a **timeout error**.
-- **Timeouts:** `timeout` is the total RR budget. `readTimeout` on **Android** sets `SO_TIMEOUT` on the continuous reader. On **iOS** it’s a no-op. On **Electron** it sets the default `timeout` used by `writeAndRead` when no explicit `timeout` is passed.
-- **Streaming (`tcpData` events):** micro-batched **every 10 ms or 16 KB**; on Electron the batch is split by your `chunkSize` before it’s sent to the web layer.
+- **Timeouts:** `timeout` is the total RR budget. `readTimeout` on **Android** sets `SO_TIMEOUT` for the continuous reader. On **iOS** it’s a no-op (evented I/O). On **Electron** it sets the per-connection default `timeout` used by `writeAndRead` when no explicit `timeout` is passed; the stream reader itself has no timeout.
+- **Streaming (`tcpData` events):** native/Electron stream data is micro-batched **every 10 ms or 16 KB**. On Android/iOS, `chunkSize` controls each native socket read before batching; on Electron, the merged batch is split by `chunkSize` before it is sent to the web layer.
 - **Bytes & flags:** `bytesSent` = actually written; on RR timeout it remains the request length, on other errors it’s `0`. `bytesReceived` = length of returned `data`. `matched` = whether `expect` was found.
-- **Connectivity (`isConnected()`)**: fast socket check. If RR/stream is running it returns `true`; otherwise it performs an active peek/EOF check and emits `tcpDisconnect` on remote close.
+- **Connectivity (`isConnected()`)**: iOS/Android perform an active EOF check when no stream/RR read is active and may emit `tcpDisconnect` on remote close. Electron performs a fast local socket-state check. The Web stub returns a mock connected state.
 - **Stream suspension:** `suspendStreamDuringRR` (default **true**) temporarily detaches streaming so the RR read can’t be “stolen” by the stream consumer.
 - **Security:** plain **TCP** only (no TLS). Use an external TLS terminator (e.g., stunnel) if you need TLS.
 
@@ -103,7 +129,7 @@ await conn.destroy();
 
 - **Why “until-idle” without `expect`?** Many devices reply in fragments; a short adaptive idle window (~50–200 ms) avoids cutting responses.
 - **Why success on `expect` + timeout (with data)?** To avoid dropping partial replies; `matched:false` tells you the pattern didn’t occur.
-- **Why does `readTimeout` behave differently per platform?** On Android, `SO_TIMEOUT` applies to the blocking stream reader. On iOS, evented reads make it a no-op. On Electron, it sets the default `timeout` for `writeAndRead` — the stream reader itself runs continuously without a timeout.
+- **Why does `readTimeout` behave differently per platform?** On Android, `SO_TIMEOUT` applies to the blocking stream reader. On iOS, evented reads (via `DispatchSourceRead`) make it a no-op. On Electron, it sets the per-connection default `timeout` for `writeAndRead`; the stream reader is event-driven and has no built-in timeout.
 
 ## Minimal usage (recap)
 
@@ -115,7 +141,8 @@ const conn = TCPClient.createConnection({ host: '192.168.1.100', port: 9100, tim
 
 await conn.connect();
 
-// stream (micro-batch 10 ms / 16 KB; split by chunkSize on Electron)
+// stream (micro-batch 10 ms / 16 KB; chunkSize controls native read size,
+// and on Electron also the emitted event split size)
 // Register listeners before startRead so no events are missed
 await conn.addListener('tcpData', ({ data }) => {
   console.log('RX:', data.length);
@@ -144,6 +171,7 @@ await conn.destroy();
 <docgen-index>
 
 * [`createConnection(...)`](#createconnection)
+* [`getPlatform()`](#getplatform)
 * [Interfaces](#interfaces)
 * [Type Aliases](#type-aliases)
 
@@ -174,6 +202,19 @@ Create (or retrieve) a TCP connection instance.
 --------------------
 
 
+### getPlatform()
+
+```typescript
+getPlatform() => Promise<TcpGetPlatformResult>
+```
+
+Returns the platform identifier of the implementation answering calls.
+
+**Returns:** <code>Promise&lt;<a href="#tcpgetplatformresult">TcpGetPlatformResult</a>&gt;</code>
+
+--------------------
+
+
 ### Interfaces
 
 
@@ -186,21 +227,21 @@ Each instance has its own socket, event listeners, and lifecycle.
 | ------------------ | ------------------- |
 | **`connectionId`** | <code>string</code> |
 
-| Method                 | Signature                                                                                                                                                                                          | Description                                                                                                                                      |
-| ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
-| **connect**            | (options?: <a href="#partial">Partial</a>&lt;<a href="#tcpconnectoptions">TcpConnectOptions</a>&gt; \| undefined) =&gt; Promise&lt;<a href="#tcpconnectresult">TcpConnectResult</a>&gt;            | Open the socket. Options are merged with the defaults supplied in createConnection(). host must be present either in createConnection() or here. |
-| **disconnect**         | () =&gt; Promise&lt;<a href="#tcpdisconnectresult">TcpDisconnectResult</a>&gt;                                                                                                                     | Close the socket. Idempotent. Emits tcpDisconnect(reason: manual).                                                                               |
-| **isConnected**        | () =&gt; Promise&lt;<a href="#tcpisconnectedresult">TcpIsConnectedResult</a>&gt;                                                                                                                   |                                                                                                                                                  |
-| **isReading**          | () =&gt; Promise&lt;<a href="#tcpisreadingresult">TcpIsReadingResult</a>&gt;                                                                                                                       |                                                                                                                                                  |
-| **write**              | (options: <a href="#tcpwriteoptions">TcpWriteOptions</a>) =&gt; Promise&lt;<a href="#tcpwriteresult">TcpWriteResult</a>&gt;                                                                        |                                                                                                                                                  |
-| **writeAndRead**       | (options: <a href="#tcpwriteandreadoptions">TcpWriteAndReadOptions</a>) =&gt; Promise&lt;<a href="#tcpwriteandreadresult">TcpWriteAndReadResult</a>&gt;                                            |                                                                                                                                                  |
-| **startRead**          | (options?: <a href="#tcpstartreadoptions">TcpStartReadOptions</a> \| undefined) =&gt; Promise&lt;<a href="#tcpstartstopresult">TcpStartStopResult</a>&gt;                                          |                                                                                                                                                  |
-| **stopRead**           | () =&gt; Promise&lt;<a href="#tcpstartstopresult">TcpStartStopResult</a>&gt;                                                                                                                       |                                                                                                                                                  |
-| **setReadTimeout**     | (options: { readTimeout: number; }) =&gt; Promise&lt;{ error: boolean; errorMessage?: string \| null; }&gt;                                                                                        | Configure stream read timeout (Android only). iOS: no-op.                                                                                        |
-| **addListener**        | (eventName: 'tcpData', listenerFunc: (event: <a href="#tcpdataevent">TcpDataEvent</a>) =&gt; void) =&gt; Promise&lt;<a href="#pluginlistenerhandle">PluginListenerHandle</a>&gt;                   | Subscribe to stream data. Only events for this connectionId are delivered.                                                                       |
-| **addListener**        | (eventName: 'tcpDisconnect', listenerFunc: (event: <a href="#tcpdisconnectevent">TcpDisconnectEvent</a>) =&gt; void) =&gt; Promise&lt;<a href="#pluginlistenerhandle">PluginListenerHandle</a>&gt; | Subscribe to disconnect notifications for this connection.                                                                                       |
-| **removeAllListeners** | () =&gt; Promise&lt;void&gt;                                                                                                                                                                       | Remove all listeners registered through this instance.                                                                                           |
-| **destroy**            | () =&gt; Promise&lt;void&gt;                                                                                                                                                                       | Disconnect, remove all listeners, and release this instance from the registry.                                                                   |
+| Method                 | Signature                                                                                                                                                                                          | Description                                                                                                                                                                                                                                                                        |
+| ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **connect**            | (options?: <a href="#partial">Partial</a>&lt;<a href="#tcpconnectoptions">TcpConnectOptions</a>&gt; \| undefined) =&gt; Promise&lt;<a href="#tcpconnectresult">TcpConnectResult</a>&gt;            | Open the socket. Options are merged with the defaults supplied in createConnection(). host must be present either in createConnection() or here.                                                                                                                                   |
+| **disconnect**         | () =&gt; Promise&lt;<a href="#tcpdisconnectresult">TcpDisconnectResult</a>&gt;                                                                                                                     | Close the socket. Idempotent. Emits tcpDisconnect(reason: manual).                                                                                                                                                                                                                 |
+| **isConnected**        | () =&gt; Promise&lt;<a href="#tcpisconnectedresult">TcpIsConnectedResult</a>&gt;                                                                                                                   |                                                                                                                                                                                                                                                                                    |
+| **isReading**          | () =&gt; Promise&lt;<a href="#tcpisreadingresult">TcpIsReadingResult</a>&gt;                                                                                                                       |                                                                                                                                                                                                                                                                                    |
+| **write**              | (options: <a href="#tcpwriteoptions">TcpWriteOptions</a>) =&gt; Promise&lt;<a href="#tcpwriteresult">TcpWriteResult</a>&gt;                                                                        |                                                                                                                                                                                                                                                                                    |
+| **writeAndRead**       | (options: <a href="#tcpwriteandreadoptions">TcpWriteAndReadOptions</a>) =&gt; Promise&lt;<a href="#tcpwriteandreadresult">TcpWriteAndReadResult</a>&gt;                                            |                                                                                                                                                                                                                                                                                    |
+| **startRead**          | (options?: <a href="#tcpstartreadoptions">TcpStartReadOptions</a> \| undefined) =&gt; Promise&lt;<a href="#tcpstartstopresult">TcpStartStopResult</a>&gt;                                          |                                                                                                                                                                                                                                                                                    |
+| **stopRead**           | () =&gt; Promise&lt;<a href="#tcpstartstopresult">TcpStartStopResult</a>&gt;                                                                                                                       |                                                                                                                                                                                                                                                                                    |
+| **setReadTimeout**     | (options: { readTimeout: number; }) =&gt; Promise&lt;{ error: boolean; errorMessage?: string \| null; }&gt;                                                                                        | Configure stream read timeout. - Android: sets `SO_TIMEOUT` on the continuous reader socket (applies during `startRead`). - iOS: no-op (evented I/O, no blocking timeout). - Electron: sets the default `timeout` value used by `writeAndRead` when no explicit timeout is passed. |
+| **addListener**        | (eventName: 'tcpData', listenerFunc: (event: <a href="#tcpdataevent">TcpDataEvent</a>) =&gt; void) =&gt; Promise&lt;<a href="#pluginlistenerhandle">PluginListenerHandle</a>&gt;                   | Subscribe to stream data. Only events for this connectionId are delivered.                                                                                                                                                                                                         |
+| **addListener**        | (eventName: 'tcpDisconnect', listenerFunc: (event: <a href="#tcpdisconnectevent">TcpDisconnectEvent</a>) =&gt; void) =&gt; Promise&lt;<a href="#pluginlistenerhandle">PluginListenerHandle</a>&gt; | Subscribe to disconnect notifications for this connection.                                                                                                                                                                                                                         |
+| **removeAllListeners** | () =&gt; Promise&lt;void&gt;                                                                                                                                                                       | Remove all listeners registered through this instance.                                                                                                                                                                                                                             |
+| **destroy**            | () =&gt; Promise&lt;void&gt;                                                                                                                                                                       | Disconnect, remove all listeners, and release this instance from the registry.                                                                                                                                                                                                     |
 
 
 #### TcpConnectResult
@@ -376,10 +417,10 @@ buffer as needed.
 
 #### TcpStartReadOptions
 
-| Prop              | Type                | Description                                                        |
-| ----------------- | ------------------- | ------------------------------------------------------------------ |
-| **`chunkSize`**   | <code>number</code> | Maximum bytes per emitted tcpData event. Default 4096.             |
-| **`readTimeout`** | <code>number</code> | Stream read timeout (ms). Android: applies SO_TIMEOUT; iOS: no-op. |
+| Prop              | Type                | Description                                                                                                                                                                                                            |
+| ----------------- | ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **`chunkSize`**   | <code>number</code> | Stream read chunk size in bytes. Default 4096. - Android/iOS: size of each native socket read before bridge micro-batching. - Electron: maximum bytes per emitted tcpData event after micro-batching.                  |
+| **`readTimeout`** | <code>number</code> | Stream read timeout in ms. - Android: sets `SO_TIMEOUT` for the continuous reader. - iOS: no-op. - Electron: updates the per-connection default `writeAndRead` timeout; the stream reader itself remains event-driven. |
 
 
 #### PluginListenerHandle
@@ -423,6 +464,15 @@ defaults for every connect() call on the returned instance.
 | **`connectionId`** | <code>string</code> | Optional stable identifier for this connection. If an instance with this id already exists in the registry, it is returned as-is. Omit to get a new instance with a generated UUID each time. |
 
 
+#### TcpGetPlatformResult
+
+| Prop               | Type                                                |
+| ------------------ | --------------------------------------------------- |
+| **`error`**        | <code>boolean</code>                                |
+| **`errorMessage`** | <code>string \| null</code>                         |
+| **`platform`**     | <code><a href="#tcpplatform">TcpPlatform</a></code> |
+
+
 ### Type Aliases
 
 
@@ -436,5 +486,10 @@ Make all properties in T optional
 #### ArrayBufferLike
 
 <code>ArrayBufferTypes[keyof ArrayBufferTypes]</code>
+
+
+#### TcpPlatform
+
+<code>'ios' | 'android' | 'web' | 'electron'</code>
 
 </docgen-api>

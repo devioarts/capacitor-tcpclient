@@ -8,6 +8,7 @@ import type {
   TcpConnectOptions,
   TcpConnectResult,
   TcpDisconnectResult,
+  TcpGetPlatformResult,
   TcpIsConnectedResult,
   TcpIsReadingResult,
   TcpWriteOptions,
@@ -22,6 +23,7 @@ import type {
 
 // Internal bridge interface — native receives connectionId on every call
 interface _Bridge {
+  getPlatform(): Promise<TcpGetPlatformResult>;
   connect(opts: TcpConnectOptions & { connectionId: string }): Promise<TcpConnectResult>;
   disconnect(opts: { connectionId: string }): Promise<TcpDisconnectResult>;
   isConnected(opts: { connectionId: string }): Promise<TcpIsConnectedResult>;
@@ -41,12 +43,12 @@ interface _Bridge {
 
 const _bridge = registerPlugin<_Bridge>('TCPClient', {
   web: () => import('./web').then((m) => new m.TCPClientWeb()),
+  electron: () => Promise.resolve((window as any).CapacitorCustomPlatform.plugins.TCPClient as _Bridge),
 });
 
 function _uuid(): string {
-  const c = crypto as any;
-  if (typeof c !== 'undefined' && typeof c.randomUUID === 'function') {
-    return c.randomUUID() as string;
+  if (typeof crypto !== 'undefined' && typeof (crypto as any).randomUUID === 'function') {
+    return (crypto as any).randomUUID() as string;
   }
   // Fallback for environments without crypto.randomUUID
   return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
@@ -70,7 +72,7 @@ class _TCPConnection implements TCPConnection {
 
   connect(options: Partial<TcpConnectOptions> = {}): Promise<TcpConnectResult> {
     const merged = { ...this._defaults, ...options };
-    if (!merged.host) return Promise.reject(new Error('host is required'));
+    if (!merged.host) return Promise.resolve({ error: true, errorMessage: 'host is required', connected: false });
     return _bridge.connect({ ...(merged as TcpConnectOptions), connectionId: this.connectionId });
   }
 
@@ -120,7 +122,16 @@ class _TCPConnection implements TCPConnection {
     const wrapped = (event: any) => {
       if (event.connectionId === id) listenerFunc(event);
     };
-    const handle = await _bridge.addListener(eventName, wrapped);
+    const raw = await _bridge.addListener(eventName, wrapped);
+    // Capacitor bridge returns PluginListenerHandle; Electron preload returns a string id
+    const handle: PluginListenerHandle =
+      typeof raw === 'string'
+        ? {
+            remove: async () => {
+              (_bridge as any).removeListener?.(raw);
+            },
+          }
+        : (raw as unknown as PluginListenerHandle);
     const ownHandle: PluginListenerHandle = {
       remove: async () => {
         await handle.remove();
@@ -155,6 +166,10 @@ const TCPClient: TCPClientPlugin = {
     const conn = new _TCPConnection(id, connectDefaults);
     _registry.set(id, conn);
     return conn;
+  },
+
+  getPlatform(): Promise<TcpGetPlatformResult> {
+    return _bridge.getPlatform();
   },
 };
 

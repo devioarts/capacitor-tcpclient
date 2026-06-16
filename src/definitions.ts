@@ -11,8 +11,8 @@ import type { PluginListenerHandle } from '@capacitor/core';
  * - Two data paths per connection:
  *   1) Stream reader (startRead/stopRead) that emits tcpData events.
  *   2) Request/Response (writeAndRead) with timeout, optional byte-pattern matching, and a cap.
- * - Event micro-batching: platforms buffer short bursts and flush every ~10ms or when ~16KB
- *   accumulates. Each event carries connectionId so the JS layer can route it.
+ * - Event micro-batching: native/Electron platforms buffer short bursts and flush every ~10ms
+ *   or when ~16KB accumulates. Each event carries connectionId so the JS layer can route it.
  * - Defaults: port=9100, connect timeout=3000ms, stream chunkSize=4096 bytes,
  *   RR timeout=1000ms, RR maxBytes=4096, TCP_NODELAY=true, SO_KEEPALIVE=true.
  */
@@ -62,9 +62,19 @@ export interface TcpIsReadingResult {
 /* ====== Stream (reader) ====== */
 
 export interface TcpStartReadOptions {
-  /** Maximum bytes per emitted tcpData event. Default 4096. */
+  /**
+   * Stream read chunk size in bytes. Default 4096.
+   * - Android/iOS: size of each native socket read before bridge micro-batching.
+   * - Electron: maximum bytes per emitted tcpData event after micro-batching.
+   */
   chunkSize?: number;
-  /** Stream read timeout (ms). Android: applies SO_TIMEOUT; iOS: no-op. */
+  /**
+   * Stream read timeout in ms.
+   * - Android: sets `SO_TIMEOUT` for the continuous reader.
+   * - iOS: no-op.
+   * - Electron: updates the per-connection default `writeAndRead` timeout; the stream reader
+   *   itself remains event-driven.
+   */
   readTimeout?: number;
 }
 
@@ -170,7 +180,12 @@ export interface TCPConnection {
   startRead(options?: TcpStartReadOptions): Promise<TcpStartStopResult>;
   stopRead(): Promise<TcpStartStopResult>;
 
-  /** Configure stream read timeout (Android only). iOS: no-op. */
+  /**
+   * Configure stream read timeout.
+   * - Android: sets `SO_TIMEOUT` on the continuous reader socket (applies during `startRead`).
+   * - iOS: no-op (evented I/O, no blocking timeout).
+   * - Electron: sets the default `timeout` value used by `writeAndRead` when no explicit timeout is passed.
+   */
   setReadTimeout(options: { readTimeout: number }): Promise<{ error: boolean; errorMessage?: string | null }>;
 
   /** Subscribe to stream data. Only events for this connectionId are delivered. */
@@ -189,6 +204,16 @@ export interface TCPConnection {
   destroy(): Promise<void>;
 }
 
+/* ====== Platform ====== */
+
+export type TcpPlatform = 'ios' | 'android' | 'web' | 'electron';
+
+export interface TcpGetPlatformResult {
+  error: boolean;
+  errorMessage?: string | null;
+  platform: TcpPlatform;
+}
+
 /* ====== Plugin surface ====== */
 
 export interface TCPClientPlugin {
@@ -201,4 +226,7 @@ export interface TCPClientPlugin {
    * - host/port/timeout/noDelay/keepAlive supplied here become defaults for connect().
    */
   createConnection(options?: TcpCreateConnectionOptions): TCPConnection;
+
+  /** Returns the platform identifier of the implementation answering calls. */
+  getPlatform(): Promise<TcpGetPlatformResult>;
 }

@@ -76,6 +76,9 @@ public class TCPClientPlugin: CAPPlugin, CAPBridgedPlugin {
             call.resolve(["error": true, "errorMessage": "host is required", "connected": false]); return
         }
         let port = call.getInt("port") ?? 9100
+        guard (1...65535).contains(port) else {
+            call.resolve(["error": true, "errorMessage": "invalid port", "connected": false]); return
+        }
         let timeout = call.getInt("timeout") ?? 3000
         let noDelay = call.getBool("noDelay") ?? true
         let keepAlive = call.getBool("keepAlive") ?? true
@@ -163,7 +166,7 @@ public class TCPClientPlugin: CAPPlugin, CAPBridgedPlugin {
     }
 
     @objc func setReadTimeout(_ call: CAPPluginCall) {
-        // iOS: no-op for parity with Android
+        // iOS stream reads are event-driven, so readTimeout is accepted for API parity only.
         _ = call.getString("connectionId")
         _ = call.getInt("readTimeout")
         call.resolve(["error": false, "errorMessage": NSNull()])
@@ -185,7 +188,13 @@ public class TCPClientPlugin: CAPPlugin, CAPBridgedPlugin {
         let timeout = call.getInt("timeout") ?? 1000
         let maxBytes = call.getInt("maxBytes") ?? 4096
         let suspendRR = call.getBool("suspendStreamDuringRR") ?? true
-        let matcher = buildMatcher(call)
+        let matcher: ((Data) -> Bool)?
+        do {
+            matcher = try buildMatcher(call)
+        } catch {
+            call.resolve(["error": true, "errorMessage": error.localizedDescription,
+                          "bytesSent": 0, "bytesReceived": 0, "data": [], "matched": false]); return
+        }
 
         state.client.writeAndRead(bytes, timeout: timeout, maxBytes: maxBytes, expect: matcher, suspendStreamDuringRR: suspendRR) { res in
             switch res {
@@ -194,7 +203,13 @@ public class TCPClientPlugin: CAPPlugin, CAPBridgedPlugin {
                               "bytesSent": bytes.count, "bytesReceived": rrResult.data.count,
                               "data": Array(rrResult.data), "matched": rrResult.matched])
             case .failure(let err):
-                let timedOut = (err as? TCPClient.TcpError).map { if case .connectTimeout = $0 { return true }; return false } ?? false
+                let timedOut: Bool = {
+                    guard let tcpError = err as? TCPClient.TcpError else { return false }
+                    switch tcpError {
+                    case .connectTimeout, .readTimeout: return true
+                    default: return false
+                    }
+                }()
                 call.resolve(["error": true, "errorMessage": "writeAndRead failed: \(err.localizedDescription)",
                               "bytesSent": timedOut ? bytes.count : 0, "bytesReceived": 0,
                               "data": [], "matched": false])
@@ -203,17 +218,19 @@ public class TCPClientPlugin: CAPPlugin, CAPBridgedPlugin {
     }
 
     /// Build an optional byte-pattern matcher from the "expect" call parameter.
-    private func buildMatcher(_ call: CAPPluginCall) -> ((Data) -> Bool)? {
+    private func buildMatcher(_ call: CAPPluginCall) throws -> ((Data) -> Bool)? {
         if let hexStr = call.getString("expect"), !hexStr.isEmpty {
-            let clean = hexStr.lowercased()
+            let clean = String(hexStr.lowercased()
                 .replacingOccurrences(of: "0x", with: "")
-                .replacingOccurrences(of: " ", with: "")
-            guard !clean.isEmpty, clean.count % 2 == 0 else { return nil }
+                .filter { !$0.isWhitespace })
+            guard !clean.isEmpty, clean.count % 2 == 0 else { throw invalidExpectError("invalid expect (hex)") }
             var pattern = Data(capacity: clean.count / 2)
             var idx = clean.startIndex
             while idx < clean.endIndex {
                 let nextIdx = clean.index(idx, offsetBy: 2)
-                guard let byte = UInt8(clean[idx..<nextIdx], radix: 16) else { break }
+                guard let byte = UInt8(clean[idx..<nextIdx], radix: 16) else {
+                    throw invalidExpectError("invalid expect (hex)")
+                }
                 pattern.append(byte)
                 idx = nextIdx
             }
@@ -224,6 +241,10 @@ public class TCPClientPlugin: CAPPlugin, CAPBridgedPlugin {
             return { buf in buf.range(of: pattern) != nil }
         }
         return nil
+    }
+
+    private func invalidExpectError(_ message: String) -> NSError {
+        NSError(domain: "TCPClientPlugin", code: 1, userInfo: [NSLocalizedDescriptionKey: message])
     }
 
     @objc func destroyConnection(_ call: CAPPluginCall) {

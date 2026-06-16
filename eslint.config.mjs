@@ -10,7 +10,7 @@ export default tseslint.config(
       'node_modules/',
       'build/',
       '.build/',
-      'example-app/',
+      'playground/',
       'android/',
       'ios/',
       'electron/*.cjs',

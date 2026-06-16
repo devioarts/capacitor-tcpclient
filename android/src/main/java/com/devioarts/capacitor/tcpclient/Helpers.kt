@@ -74,24 +74,6 @@ object Helpers {
     }
 
     /**
-     * Lenient conversion: skips non-numeric entries instead of failing.
-     * - Useful if you prefer best-effort writes.
-     * - Keeps original order of valid items.
-     */
-    fun jsArrayToBytesLenient(arr: JSArray): ByteArray {
-        val tmp = ArrayList<Byte>(arr.length())
-        for (i in 0 until arr.length()) {
-            try {
-                val v = arr.getInt(i)
-                tmp.add((v and 0xFF).toByte())
-            } catch (_: Exception) {
-                // skip
-            }
-        }
-        return tmp.toByteArray()
-    }
-
-    /**
      * Convert a ByteArray into a JSArray of integers (0..255).
      *
      * Rationale:
@@ -110,9 +92,9 @@ object Helpers {
      * - Whitespace is ignored; case-insensitive.
      * - Returns null if the string is empty, has odd length, or contains invalid hex digits.
      *
-     * Extensions you might add later (not implemented here):
-     * - Accept "0x" prefixes
-     * - Ignore commas or other separators
+     * Accepted forms:
+     * - Optional "0x" prefixes are stripped.
+     * - Spaces are ignored.
      */
     fun hexToBytes(str: String): ByteArray? {
         // allow: "1b40", "1B 40", "0x1b 0x40", "1B40"

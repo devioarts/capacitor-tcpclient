@@ -16,6 +16,7 @@ final class TCPClient {
     enum TcpError: Error {
         case notConnected
         case connectTimeout
+        case readTimeout
         case closed
         case invalidPort
         case readStopped
@@ -368,7 +369,11 @@ final class TCPClient {
 
             let wasReading = self.reading
             if suspendStreamDuringRR && wasReading {
-                self.stopRead()
+                // Cancel inline: stopRead() dispatches queue.async and would run AFTER
+                // writeAndRead on this same serial queue — stream would not be suspended.
+                self.reading = false
+                self.readSource?.cancel()
+                self.readSource = nil
             }
 
             // Send phase (budget = timeout)
@@ -466,7 +471,7 @@ final class TCPClient {
             }
 
             if out.isEmpty && !matched && remain <= 0 {
-                finish(.failure(TcpError.connectTimeout))
+                finish(.failure(TcpError.readTimeout))
             } else {
                 finish(.success(ReadResult(data: out, matched: matched)))
             }

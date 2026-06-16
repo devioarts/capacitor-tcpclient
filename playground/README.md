@@ -5,16 +5,16 @@ Playground app demonstrating the **multi-instance** API — each connection is i
 ## Installation from GitHub
 
 ### Download and extract the repo folder (Linux/Mac)
-> To folder `example-app`
+> To folder `playground`
 ```shell
 curl -L https://codeload.github.com/devioarts/capacitor-tcpclient/tar.gz/refs/heads/main \
-| tar -xz --strip-components=1 capacitor-tcpclient-main/example-app
-cd example-app
+| tar -xz --strip-components=1 capacitor-tcpclient-main/playground
+cd playground
 ```
 > To current folder
 ```shell
 curl -L https://codeload.github.com/devioarts/capacitor-tcpclient/tar.gz/refs/heads/main \
-| tar -xz --strip-components=2 capacitor-tcpclient-main/example-app
+| tar -xz --strip-components=2 capacitor-tcpclient-main/playground
 ```
 
 ### Install dependencies and build

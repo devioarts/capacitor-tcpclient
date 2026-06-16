@@ -3,11 +3,11 @@
  *
  * Responsibilities:
  * - Socket lifecycle: connect/disconnect with TCP_NODELAY/KEEPALIVE flags and buffered I/O
- * - Stream reader: background coroutine that emits data via delegate; SO_TIMEOUT used for idle ticks
+ * - Stream reader: background coroutine that emits data via delegate; SO_TIMEOUT controls idle wakeups
  * - Request/Response (writeAndRead): serialized write, adaptive "until-idle" when no expect, optional pattern matcher, byte cap, deadline handling, and optional stream suspension
  * - Concurrency: IO dispatcher with SupervisorJob; write serialization via Mutex; RR guarded by AtomicBoolean
  *
- * This file documents behavior and edge cases without altering logic.
+ * This core owns the actual socket and stream state; TCPClientPlugin.kt adapts it to Capacitor calls.
  */
 package com.devioarts.capacitor.tcpclient
 
@@ -40,6 +40,7 @@ class TCPClient {
         object NotConnected : TcpError("not connected")
         object Busy : TcpError("busy")
         object ConnectTimeout : TcpError("connect timeout")
+        object ReadTimeout : TcpError("read timeout")
         object Closed : TcpError("closed")
         object InvalidParams : TcpError("invalid params")
     }
@@ -72,19 +73,24 @@ class TCPClient {
         scope.launch {
             connectMutex.withLock {
                 disconnectInternal(DisconnectReason.Manual)
+                var pendingSocket: Socket? = null
                 try {
                     val s = Socket()
+                    pendingSocket = s
                     s.tcpNoDelay = noDelay
                     s.keepAlive = keepAlive
                     try {
                         s.connect(InetSocketAddress(host, port), timeout)
                     } catch (e: java.net.SocketTimeoutException) {
+                        closeQuietly(pendingSocket)
                         disconnectInternal(DisconnectReason.Error(e))
                         callback(Result.failure(TcpError.ConnectTimeout)); return@withLock
                     } catch (e: SecurityException) {
+                        closeQuietly(pendingSocket)
                         disconnectInternal(DisconnectReason.Error(e))
                         callback(Result.failure(e)); return@withLock
                     } catch (e: IOException) {
+                        closeQuietly(pendingSocket)
                         disconnectInternal(DisconnectReason.Error(e))
                         callback(Result.failure(e)); return@withLock
                     }
@@ -92,12 +98,15 @@ class TCPClient {
                         input = BufferedInputStream(s.getInputStream())
                         output = BufferedOutputStream(s.getOutputStream())
                         socket = s
+                        pendingSocket = null
                         callback(Result.success(Unit))
                     } catch (e: IOException) {
+                        closeQuietly(pendingSocket)
                         disconnectInternal(DisconnectReason.Error(e))
                         callback(Result.failure(e))
                     }
                 } catch (e: IOException) {
+                    closeQuietly(pendingSocket)
                     disconnectInternal(DisconnectReason.Error(e))
                     callback(Result.failure(e))
                 }
@@ -107,17 +116,10 @@ class TCPClient {
 
     fun disconnect() {
         scope.launch {
-            // robust during cancellation/shutdown
             withContext(NonCancellable) {
-                readerJob?.cancelAndJoin()
-                readerJob = null
-                val s = socket
-                try { output?.flush() } catch (_: Exception) {}
-                try { s?.close() } catch (_: Exception) {}
-                input = null
-                output = null
-                socket = null
-                delegate?.onDisconnect(DisconnectReason.Manual)
+                connectMutex.withLock {
+                    disconnectInternal(DisconnectReason.Manual)
+                }
             }
         }
     }
@@ -181,7 +183,7 @@ class TCPClient {
         val inp = input ?: return
         val size = if (chunkSize > 0) chunkSize else 4096
         lastChunkSize = size
-        socket?.soTimeout = if (readTimeout > 0) readTimeout else 1000
+        try { socket?.soTimeout = if (readTimeout > 0) readTimeout else 1000 } catch (_: Exception) {}
 
         readerJob = scope.launch {
             val buf = ByteArray(size)
@@ -219,6 +221,9 @@ class TCPClient {
 
     /**
      * Request/Response read with minimal allocations.
+     *
+     * The public JS default is suspendStreamDuringRR=true; the bridge passes that value explicitly.
+     * The core default remains false for direct callers.
      * - Single growth buffer [buf] with [used] counter (no per-iteration toByteArray()).
      * - [expect] receives (buffer, usedLen) to check current prefix without copying.
      */
@@ -290,7 +295,7 @@ class TCPClient {
                         if (used > 0) {
                             callback(Result.success(ReadResult(buf.copyOf(used), false))); return@launch
                         } else {
-                            callback(Result.failure(TcpError.ConnectTimeout)); return@launch
+                            callback(Result.failure(TcpError.ReadTimeout)); return@launch
                         }
                     }
 
@@ -348,6 +353,8 @@ class TCPClient {
 
                 callback(Result.success(ReadResult(buf.copyOf(used), matched)))
             } catch (e: IOException) {
+                if (e is TcpError.Closed) disconnectInternal(DisconnectReason.Remote)
+                else disconnectInternal(DisconnectReason.Error(e))
                 callback(Result.failure(e))
             } finally {
                 try { socket?.soTimeout = previousTimeout } catch (_: Exception) {}
@@ -370,6 +377,10 @@ class TCPClient {
         output = null
         socket = null
         if (hadSomething) delegate?.onDisconnect(reason)
+    }
+
+    private fun closeQuietly(s: Socket?) {
+        try { s?.close() } catch (_: Exception) {}
     }
 
     fun dispose() {

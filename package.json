@@ -16,6 +16,24 @@
   "module": "dist/esm/index.js",
   "types": "dist/esm/index.d.ts",
   "unpkg": "dist/plugin.js",
+  "exports": {
+    ".": {
+      "types": "./dist/esm/index.d.ts",
+      "import": "./dist/esm/index.js",
+      "require": "./dist/plugin.cjs.js",
+      "default": "./dist/esm/index.js"
+    },
+    "./electron": {
+      "types": "./electron/types-public/index.d.ts",
+      "require": "./electron/dist/plugin.cjs.js",
+      "default": "./electron/dist/plugin.cjs.js"
+    },
+    "./electron/settings": {
+      "require": "./electron/dist/plugin-settings.js",
+      "default": "./electron/dist/plugin-settings.js"
+    },
+    "./package.json": "./package.json"
+  },
   "files": [
     "android/src/main/",
     "android/build.gradle",
@@ -48,7 +66,7 @@
     "docgen": "docgen --api TCPClientPlugin --output-readme README.md --output-json dist/docs.json",
     "build": "npm run clean && npm run docgen && tsc && rollup -c rollup.config.mjs && npm run build-electron",
     "build-electron": "tsc --project electron/tsconfig.json && rollup -c electron/rollup.config.mjs && rimraf ./electron/build",
-    "clean": "rimraf ./dist",
+    "clean": "rimraf ./dist ./electron/dist ./electron/build",
     "watch": "tsc --watch",
     "prepublishOnly": "npm run build",
     "release": "npm publish --access public"
@@ -75,7 +93,40 @@
     "@capacitor/core": ">=8.0.0"
   },
   "prettier": "@ionic/prettier-config",
-  "swiftlint": "@ionic/swiftlint-config",
+  "swiftlint": {
+    "excluded": [
+      "${PWD}/node_modules",
+      "${PWD}/ios/Pods",
+      "${PWD}/example-app",
+      "${PWD}/playground",
+      "${PWD}/.build"
+    ],
+    "disabled_rules": [
+      "blanket_disable_command"
+    ],
+    "opt_in_rules": [
+      "implicitly_unwrapped_optional",
+      "file_name_no_space",
+      "force_unwrapping",
+      "function_default_parameter_at_end",
+      "lower_acl_than_parent",
+      "modifier_order",
+      "overridden_super_call",
+      "unowned_variable_capture",
+      "unused_import"
+    ],
+    "line_length": {
+      "warning": 150,
+      "ignores_function_declarations": true,
+      "ignores_comments": true,
+      "ignores_interpolated_strings": true,
+      "ignores_urls": true
+    },
+    "type_body_length": {
+      "warning": 300,
+      "error": 400
+    }
+  },
   "capacitor": {
     "ios": {
       "src": "ios"

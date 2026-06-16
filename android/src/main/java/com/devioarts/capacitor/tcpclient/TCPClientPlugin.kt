@@ -2,7 +2,8 @@
  * Android bridge for the TCPClient Capacitor plugin — multi-instance version.
  *
  * Each JS connectionId maps to its own TCPClient instance, delegate, and micro-batch buffer.
- * TCPClient.kt (core) is untouched — only this bridge layer changed.
+ * This bridge validates Capacitor calls, converts byte payloads, and routes native callbacks
+ * back to tcpData/tcpDisconnect events with the originating connectionId.
  */
 package com.devioarts.capacitor.tcpclient
 
@@ -194,7 +195,7 @@ class TCPClientPlugin : Plugin() {
                     .put("data", Helpers.bytesToJSArray(rr.data)).put("matched", rr.matched)
             } else {
                 val ex = res.exceptionOrNull()
-                val timedOut = ex is TCPClient.TcpError.ConnectTimeout
+                val timedOut = ex is TCPClient.TcpError.ConnectTimeout || ex is TCPClient.TcpError.ReadTimeout
                 obj.put("error", true).put("errorMessage", "writeAndRead failed: ${ex?.message}")
                     .put("bytesSent", if (timedOut) bytes.size else 0).put("bytesReceived", 0)
                     .put("data", JSArray()).put("matched", false)
