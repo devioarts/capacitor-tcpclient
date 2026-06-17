@@ -4,20 +4,31 @@ TCP Client for Capacitor with iOS/Android/Electron support
 
 ## Install
 
+For Capacitor apps:
+
 ```bash
 npm install @devioarts/capacitor-tcpclient
 npx cap sync
 ```
 
+For a plain Electron app, install the package and wire the Electron bridge
+manually as shown below. The root `@devioarts/capacitor-tcpclient` entry point
+is the Capacitor JS API; the Electron bridge is exported from
+`@devioarts/capacitor-tcpclient/electron`.
+
 ## Android
+
 #### /android/app/src/main/AndroidManifest.xml
+
 ```xml
 <uses-permission android:name="android.permission.INTERNET" />
 <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 ```
 
 ## iOS
+
 #### /ios/App/App/Info.plist
+
 ```xml
 <key>NSLocalNetworkUsageDescription</key>
 <string>It is needed for the correct functioning of the application</string>
@@ -28,32 +39,50 @@ npx cap sync
   <true/>
 </dict>
 ```
+
 ---
+
 ## ElectronJS
 
-The plugin ships a native IPC bridge for Electron.  Integration requires two
-auto-generated runtime files — one for the **main process** and one for the
-**preload script** — which wire the plugin's IPC channels to the renderer.
+The package ships a native Electron bridge for the main process. In a plain
+Electron app you register that bridge with `ipcMain`, expose a small API from
+the preload script, and call the low-level methods from the renderer with your
+own `connectionId`.
 
-> If you are using the [capacitor-electron](https://github.com/devioarts/capacitor-examples/tree/main/capacitor-electron)
-> project template, run `npm run update` inside your `electron/` directory to
-> regenerate these files automatically from the plugin's
-> `@devioarts/capacitor-tcpclient/electron/settings` metadata.
+If you use Capacitor with Electron, use
+[devioarts/capacitor-electron](https://github.com/devioarts/capacitor-electron).
+The example below is only for manual Electron integration without Capacitor.
 
-### Main process (`electron/src/rt/electron-main.ts`)
+### Main process (`electron/main.ts`)
 
 ```typescript
-// Auto-generated — do not edit. Regenerate with: npm run update
-import { app, ipcMain } from 'electron';
+import { app, BrowserWindow, ipcMain } from 'electron';
+import * as path from 'node:path';
 import { TCPClient } from '@devioarts/capacitor-tcpclient/electron';
 
 type AnyRecord = Record<string, unknown>;
 
-function registerPlugin(pluginClass: string, instance: AnyRecord, methods: readonly string[]) {
-  for (const method of methods) {
-    ipcMain.handle(`${pluginClass}-${method}`, async (_event, opts: unknown) => {
+const tcpClient = new TCPClient();
+const tcpMethods = [
+  'getPlatform',
+  'connect',
+  'disconnect',
+  'isConnected',
+  'isReading',
+  'write',
+  'startRead',
+  'stopRead',
+  'setReadTimeout',
+  'writeAndRead',
+  'destroyConnection',
+] as const;
+
+function registerTCPClient() {
+  for (const method of tcpMethods) {
+    ipcMain.handle(`TCPClient-${method}`, async (_event, opts: unknown) => {
       try {
-        return await (instance[method] as (opts: AnyRecord) => Promise<unknown>)((opts ?? {}) as AnyRecord);
+        const handler = (tcpClient as unknown as AnyRecord)[method] as (opts: AnyRecord) => Promise<unknown>;
+        return await handler((opts ?? {}) as AnyRecord);
       } catch (err) {
         return { error: true, errorMessage: err instanceof Error ? err.message : String(err) };
       }
@@ -61,68 +90,158 @@ function registerPlugin(pluginClass: string, instance: AnyRecord, methods: reado
   }
 }
 
-void (async () => {
-  await app.whenReady();
-  registerPlugin('TCPClient', new TCPClient() as unknown as AnyRecord, [
-    'getPlatform', 'connect', 'disconnect', 'isConnected', 'isReading',
-    'write', 'startRead', 'stopRead', 'setReadTimeout', 'writeAndRead', 'destroyConnection',
-  ]);
-})();
+async function createWindow() {
+  const win = new BrowserWindow({
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+    },
+  });
+
+  await win.loadURL('http://localhost:5173');
+}
+
+app.whenReady().then(async () => {
+  registerTCPClient();
+  await createWindow();
+});
 ```
 
-Import this file from your `electron/main.ts`:
+### Preload (`electron/preload.ts`)
 
 ```typescript
-import './src/rt/electron-main';
+import { contextBridge, ipcRenderer } from 'electron';
+
+type TcpEventName = 'tcpData' | 'tcpDisconnect';
+type TcpEvent = {
+  connectionId: string;
+  data?: number[];
+  disconnected?: true;
+  reading?: boolean;
+  reason?: 'manual' | 'remote' | 'error';
+  error?: string;
+};
+type ListenerHandle = { remove: () => Promise<void> };
+
+function invoke(method: string, options: Record<string, unknown> = {}) {
+  return ipcRenderer.invoke(`TCPClient-${method}`, options);
+}
+
+const api = {
+  getPlatform: () => invoke('getPlatform'),
+  connect: (options: Record<string, unknown>) => invoke('connect', options),
+  disconnect: (options: Record<string, unknown>) => invoke('disconnect', options),
+  isConnected: (options: Record<string, unknown>) => invoke('isConnected', options),
+  isReading: (options: Record<string, unknown>) => invoke('isReading', options),
+  write: (options: Record<string, unknown>) => invoke('write', options),
+  startRead: (options: Record<string, unknown>) => invoke('startRead', options),
+  stopRead: (options: Record<string, unknown>) => invoke('stopRead', options),
+  setReadTimeout: (options: Record<string, unknown>) => invoke('setReadTimeout', options),
+  writeAndRead: (options: Record<string, unknown>) => invoke('writeAndRead', options),
+  destroyConnection: (options: Record<string, unknown>) => invoke('destroyConnection', options),
+  addListener(eventName: TcpEventName, listener: (event: TcpEvent) => void): Promise<ListenerHandle> {
+    const channel = `event-TCPClient-${eventName}`;
+    const wrapped = (_event: unknown, payload: TcpEvent) => listener(payload);
+
+    ipcRenderer.send('event-add-TCPClient', eventName);
+    ipcRenderer.on(channel, wrapped);
+
+    return Promise.resolve({
+      remove: async () => {
+        ipcRenderer.off(channel, wrapped);
+        ipcRenderer.send(`event-remove-TCPClient-${eventName}`);
+      },
+    });
+  },
+};
+
+contextBridge.exposeInMainWorld('TCPClient', api);
 ```
 
-### Preload (`electron/src/rt/electron-rt.ts`)
-
-The preload runtime exposes `CapacitorCustomPlatform` to the renderer via
-`contextBridge`, mapping each method to `ipcRenderer.invoke` and routing
-events from `ipcRenderer.on`.
+### Renderer
 
 ```typescript
-// electron/preload.ts
-import './src/rt/electron-rt';
-```
+type TcpEvent = {
+  connectionId: string;
+  data?: number[];
+  reason?: 'manual' | 'remote' | 'error';
+  error?: string;
+};
+type ListenerHandle = { remove: () => Promise<void> };
+type TCPClientBridge = {
+  connect(
+    options: Record<string, unknown>,
+  ): Promise<{ error: boolean; errorMessage?: string | null; connected: boolean }>;
+  disconnect(options: {
+    connectionId: string;
+  }): Promise<{ error: boolean; errorMessage?: string | null; disconnected: boolean }>;
+  startRead(options: {
+    connectionId: string;
+    chunkSize?: number;
+    readTimeout?: number;
+  }): Promise<{ error: boolean; errorMessage?: string | null; reading: boolean }>;
+  writeAndRead(options: Record<string, unknown>): Promise<{
+    error: boolean;
+    errorMessage?: string | null;
+    data: number[];
+    bytesSent: number;
+    bytesReceived: number;
+    matched: boolean;
+  }>;
+  destroyConnection(options: { connectionId: string }): Promise<{ error: boolean; errorMessage?: string | null }>;
+  addListener(eventName: 'tcpData' | 'tcpDisconnect', listener: (event: TcpEvent) => void): Promise<ListenerHandle>;
+};
 
-See the [example project](https://github.com/devioarts/capacitor-examples) for
-the full `electron-rt.ts` and `electron-plugins.ts` sources.
+const client = (window as Window & { TCPClient: TCPClientBridge }).TCPClient;
+const connectionId = crypto.randomUUID();
 
-### Renderer (using the `@capacitor/core` JS API)
-
-```typescript
-import { TCPClient } from '@devioarts/capacitor-tcpclient';
-
-const conn = TCPClient.createConnection({ host: '192.168.1.100', port: 9100 });
-await conn.connect();
+await client.connect({
+  connectionId,
+  host: '192.168.1.100',
+  port: 9100,
+});
 
 // stream
-await conn.addListener('tcpData', ({ data }) => console.log('RX:', data));
-await conn.addListener('tcpDisconnect', ({ reason }) => console.log('disconnected:', reason));
-await conn.startRead({ chunkSize: 4096 });
+const dataListener = await client.addListener('tcpData', (event) => {
+  if (event.connectionId === connectionId) console.log('RX:', event.data);
+});
+
+const disconnectListener = await client.addListener('tcpDisconnect', (event) => {
+  if (event.connectionId === connectionId) console.log('disconnected:', event.reason);
+});
+
+await client.startRead({ connectionId, chunkSize: 4096 });
 
 // RR
-const rr = await conn.writeAndRead({ data: [0x1b, 0x40], timeout: 1000 });
+const rr = await client.writeAndRead({
+  connectionId,
+  data: [0x1b, 0x40],
+  timeout: 1000,
+});
 console.log(rr.error ? rr.errorMessage : rr.data);
 
 // cleanup
-await conn.destroy();
+await client.disconnect({ connectionId });
+await client.destroyConnection({ connectionId });
+await dataListener.remove();
+await disconnectListener.remove();
 ```
+
 ---
 
 ## Technical behavior & guarantees
 
 - **Platforms:** iOS / Android / Electron provide real TCP sockets. The Web implementation is a development stub with the same API shape but no real TCP transport.
 - **Request/Response (`writeAndRead`)**
-    - Without `expect`: returns after **until-idle** (adaptive ~50–200 ms) to capture the full reply.
-    - With `expect`: returns on first match. If `timeout` expires and **some data arrived**, returns **success** with `matched:false`; if **no data** arrived, returns a **timeout error**.
+  - Without `expect`: returns after **until-idle** (adaptive ~50–200 ms) to capture the full reply.
+  - With `expect`: returns on first match. If `timeout` expires and **some data arrived**, returns **success** with `matched:false`; if **no data** arrived, returns a **timeout error**.
 - **Timeouts:** `timeout` is the total RR budget. `readTimeout` on **Android** sets `SO_TIMEOUT` for the continuous reader. On **iOS** it’s a no-op (evented I/O). On **Electron** it sets the per-connection default `timeout` used by `writeAndRead` when no explicit `timeout` is passed; the stream reader itself has no timeout.
 - **Streaming (`tcpData` events):** native/Electron stream data is micro-batched **every 10 ms or 16 KB**. On Android/iOS, `chunkSize` controls each native socket read before batching; on Electron, the merged batch is split by `chunkSize` before it is sent to the web layer.
 - **Bytes & flags:** `bytesSent` = actually written; on RR timeout it remains the request length, on other errors it’s `0`. `bytesReceived` = length of returned `data`. `matched` = whether `expect` was found.
 - **Connectivity (`isConnected()`)**: iOS/Android perform an active EOF check when no stream/RR read is active and may emit `tcpDisconnect` on remote close. Electron performs a fast local socket-state check. The Web stub returns a mock connected state.
 - **Stream suspension:** `suspendStreamDuringRR` (default **true**) temporarily detaches streaming so the RR read can’t be “stolen” by the stream consumer.
+- **Electron API shape:** the root package exposes `TCPClient.createConnection()`. The manual Electron bridge uses low-level methods directly and requires `connectionId` on every call.
 - **Security:** plain **TCP** only (no TLS). Use an external TLS terminator (e.g., stunnel) if you need TLS.
 
 ## FAQ
@@ -131,7 +250,7 @@ await conn.destroy();
 - **Why success on `expect` + timeout (with data)?** To avoid dropping partial replies; `matched:false` tells you the pattern didn’t occur.
 - **Why does `readTimeout` behave differently per platform?** On Android, `SO_TIMEOUT` applies to the blocking stream reader. On iOS, evented reads (via `DispatchSourceRead`) make it a no-op. On Electron, it sets the per-connection default `timeout` for `writeAndRead`; the stream reader is event-driven and has no built-in timeout.
 
-## Minimal usage (recap)
+## Minimal Capacitor usage
 
 ```ts
 import { TCPClient } from '@devioarts/capacitor-tcpclient';
@@ -168,12 +287,17 @@ await conn.destroy();
 
 ## API
 
+The generated API below documents the root
+`@devioarts/capacitor-tcpclient` entry point used by Capacitor apps. The manual
+Electron bridge shown above exposes the same native methods directly over IPC,
+so it uses `connectionId` instead of `createConnection()`.
+
 <docgen-index>
 
-* [`createConnection(...)`](#createconnection)
-* [`getPlatform()`](#getplatform)
-* [Interfaces](#interfaces)
-* [Type Aliases](#type-aliases)
+- [`createConnection(...)`](#createconnection)
+- [`getPlatform()`](#getplatform)
+- [Interfaces](#interfaces)
+- [Type Aliases](#type-aliases)
 
 </docgen-index>
 
@@ -199,8 +323,7 @@ Create (or retrieve) a TCP connection instance.
 
 **Returns:** <code><a href="#tcpconnection">TCPConnection</a></code>
 
---------------------
-
+---
 
 ### getPlatform()
 
@@ -212,11 +335,9 @@ Returns the platform identifier of the implementation answering calls.
 
 **Returns:** <code>Promise&lt;<a href="#tcpgetplatformresult">TcpGetPlatformResult</a>&gt;</code>
 
---------------------
-
+---
 
 ### Interfaces
-
 
 #### TCPConnection
 
@@ -243,7 +364,6 @@ Each instance has its own socket, event listeners, and lifecycle.
 | **removeAllListeners** | () =&gt; Promise&lt;void&gt;                                                                                                                                                                       | Remove all listeners registered through this instance.                                                                                                                                                                                                                             |
 | **destroy**            | () =&gt; Promise&lt;void&gt;                                                                                                                                                                       | Disconnect, remove all listeners, and release this instance from the registry.                                                                                                                                                                                                     |
 
-
 #### TcpConnectResult
 
 | Prop               | Type                        |
@@ -251,7 +371,6 @@ Each instance has its own socket, event listeners, and lifecycle.
 | **`error`**        | <code>boolean</code>        |
 | **`errorMessage`** | <code>string \| null</code> |
 | **`connected`**    | <code>boolean</code>        |
-
 
 #### TcpConnectOptions
 
@@ -263,7 +382,6 @@ Each instance has its own socket, event listeners, and lifecycle.
 | **`noDelay`**   | <code>boolean</code> | Enable TCP_NODELAY (Nagle off). Default true.                          |
 | **`keepAlive`** | <code>boolean</code> | Enable SO_KEEPALIVE. Default true.                                     |
 
-
 #### TcpDisconnectResult
 
 | Prop               | Type                        |
@@ -273,7 +391,6 @@ Each instance has its own socket, event listeners, and lifecycle.
 | **`disconnected`** | <code>boolean</code>        |
 | **`reading`**      | <code>boolean</code>        |
 
-
 #### TcpIsConnectedResult
 
 | Prop               | Type                        |
@@ -281,7 +398,6 @@ Each instance has its own socket, event listeners, and lifecycle.
 | **`error`**        | <code>boolean</code>        |
 | **`errorMessage`** | <code>string \| null</code> |
 | **`connected`**    | <code>boolean</code>        |
-
 
 #### TcpIsReadingResult
 
@@ -291,7 +407,6 @@ Each instance has its own socket, event listeners, and lifecycle.
 | **`errorMessage`** | <code>string \| null</code> |
 | **`reading`**      | <code>boolean</code>        |
 
-
 #### TcpWriteResult
 
 | Prop               | Type                        |
@@ -300,13 +415,11 @@ Each instance has its own socket, event listeners, and lifecycle.
 | **`errorMessage`** | <code>string \| null</code> |
 | **`bytesSent`**    | <code>number</code>         |
 
-
 #### TcpWriteOptions
 
 | Prop       | Type                                                          |
 | ---------- | ------------------------------------------------------------- |
 | **`data`** | <code>number[] \| <a href="#uint8array">Uint8Array</a></code> |
-
 
 #### Uint8Array
 
@@ -350,13 +463,11 @@ requested number of bytes could not be allocated an exception is raised.
 | **toString**       | () =&gt; string                                                                                                                                                                | Returns a string representation of an array.                                                                                                                                                                                                |
 | **valueOf**        | () =&gt; <a href="#uint8array">Uint8Array</a>                                                                                                                                  | Returns the primitive value of the specified object.                                                                                                                                                                                        |
 
-
 #### ArrayLike
 
 | Prop         | Type                |
 | ------------ | ------------------- |
 | **`length`** | <code>number</code> |
-
 
 #### ArrayBufferTypes
 
@@ -365,7 +476,6 @@ Allowed <a href="#arraybuffer">ArrayBuffer</a> types for the buffer of an ArrayB
 | Prop              | Type                                                |
 | ----------------- | --------------------------------------------------- |
 | **`ArrayBuffer`** | <code><a href="#arraybuffer">ArrayBuffer</a></code> |
-
 
 #### ArrayBuffer
 
@@ -382,7 +492,6 @@ buffer as needed.
 | --------- | --------------------------------------------------------------------------------------- | --------------------------------------------------------------- |
 | **slice** | (begin: number, end?: number \| undefined) =&gt; <a href="#arraybuffer">ArrayBuffer</a> | Returns a section of an <a href="#arraybuffer">ArrayBuffer</a>. |
 
-
 #### TcpWriteAndReadResult
 
 | Prop                | Type                        |
@@ -394,7 +503,6 @@ buffer as needed.
 | **`data`**          | <code>number[]</code>       |
 | **`matched`**       | <code>boolean</code>        |
 
-
 #### TcpWriteAndReadOptions
 
 | Prop                        | Type                                                                    | Description                                                                                                                                    |
@@ -405,7 +513,6 @@ buffer as needed.
 | **`expect`**                | <code>string \| number[] \| <a href="#uint8array">Uint8Array</a></code> | Optional pattern — reading stops when found. Accepts number[] / <a href="#uint8array">Uint8Array</a> or hex string (e.g. "1B40", "0x1b 0x40"). |
 | **`suspendStreamDuringRR`** | <code>boolean</code>                                                    | Suspend stream reader during RR to avoid consuming reply. Default true.                                                                        |
 
-
 #### TcpStartStopResult
 
 | Prop               | Type                        |
@@ -414,7 +521,6 @@ buffer as needed.
 | **`errorMessage`** | <code>string \| null</code> |
 | **`reading`**      | <code>boolean</code>        |
 
-
 #### TcpStartReadOptions
 
 | Prop              | Type                | Description                                                                                                                                                                                                            |
@@ -422,13 +528,11 @@ buffer as needed.
 | **`chunkSize`**   | <code>number</code> | Stream read chunk size in bytes. Default 4096. - Android/iOS: size of each native socket read before bridge micro-batching. - Electron: maximum bytes per emitted tcpData event after micro-batching.                  |
 | **`readTimeout`** | <code>number</code> | Stream read timeout in ms. - Android: sets `SO_TIMEOUT` for the continuous reader. - iOS: no-op. - Electron: updates the per-connection default `writeAndRead` timeout; the stream reader itself remains event-driven. |
 
-
 #### PluginListenerHandle
 
 | Prop         | Type                                      |
 | ------------ | ----------------------------------------- |
 | **`remove`** | <code>() =&gt; Promise&lt;void&gt;</code> |
-
 
 #### TcpDataEvent
 
@@ -438,7 +542,6 @@ Emitted by the stream reader. connectionId identifies which connection sent the 
 | ------------------ | --------------------- |
 | **`connectionId`** | <code>string</code>   |
 | **`data`**         | <code>number[]</code> |
-
 
 #### TcpDisconnectEvent
 
@@ -452,7 +555,6 @@ Emitted when a connection closes.
 | **`reason`**       | <code>'error' \| 'manual' \| 'remote'</code> |
 | **`error`**        | <code>string</code>                          |
 
-
 #### TcpCreateConnectionOptions
 
 Options for TCPClient.createConnection().
@@ -463,7 +565,6 @@ defaults for every connect() call on the returned instance.
 | ------------------ | ------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **`connectionId`** | <code>string</code> | Optional stable identifier for this connection. If an instance with this id already exists in the registry, it is returned as-is. Omit to get a new instance with a generated UUID each time. |
 
-
 #### TcpGetPlatformResult
 
 | Prop               | Type                                                |
@@ -472,21 +573,19 @@ defaults for every connect() call on the returned instance.
 | **`errorMessage`** | <code>string \| null</code>                         |
 | **`platform`**     | <code><a href="#tcpplatform">TcpPlatform</a></code> |
 
-
 ### Type Aliases
-
 
 #### Partial
 
 Make all properties in T optional
 
-<code>{ [P in keyof T]?: T[P]; }</code>
-
+<code>{
+ [P in keyof T]?: T[P];
+ }</code>
 
 #### ArrayBufferLike
 
 <code>ArrayBufferTypes[keyof ArrayBufferTypes]</code>
-
 
 #### TcpPlatform
 
