@@ -19,7 +19,9 @@
 
 import { ipcMain } from 'electron';
 import type { WebContents } from 'electron';
-import net from 'net';
+// Use CommonJS import form so tsc does not emit top-level `this` helpers before Rollup.
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+import net = require('net');
 
 // ---------------------------------------------------------------------------
 // parseExpectBytes — inlined from src/utils/expect (src/ not in published pkg)
