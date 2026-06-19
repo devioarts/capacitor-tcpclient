@@ -15,7 +15,8 @@ public class TCPClientPlugin: CAPPlugin, CAPBridgedPlugin {
         CAPPluginMethod(name: "stopRead", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "setReadTimeout", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "writeAndRead", returnType: CAPPluginReturnPromise),
-        CAPPluginMethod(name: "destroyConnection", returnType: CAPPluginReturnPromise)
+        CAPPluginMethod(name: "destroyConnection", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "getPluginPlatform", returnType: CAPPluginReturnPromise),
     ]
 
     // MARK: - Per-connection state
@@ -314,6 +315,10 @@ public class TCPClientPlugin: CAPPlugin, CAPBridgedPlugin {
             return out
         }
         return nil
+    }
+
+    @objc func getPluginPlatform(_ call: CAPPluginCall) {
+        call.resolve(["error": false, "errorMessage": NSNull(), "platform": "ios"])
     }
 
     override public func checkPermissions(_ call: CAPPluginCall) { call.resolve() }

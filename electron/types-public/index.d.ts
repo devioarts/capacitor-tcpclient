@@ -14,7 +14,7 @@ import type {
 } from '../../dist/esm/definitions';
 
 export declare class TCPClient {
-  getPlatform(): Promise<TcpGetPlatformResult>;
+  getPluginPlatform(): Promise<TcpGetPlatformResult>;
   connect(args: TcpConnectOptions & { connectionId: string }): Promise<TcpConnectResult>;
   disconnect(args: { connectionId: string }): Promise<TcpDisconnectResult>;
   isConnected(args: { connectionId: string }): Promise<TcpIsConnectedResult>;

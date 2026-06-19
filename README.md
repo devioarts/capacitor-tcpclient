@@ -64,7 +64,7 @@ type AnyRecord = Record<string, unknown>;
 
 const tcpClient = new TCPClient();
 const tcpMethods = [
-  'getPlatform',
+  'getPluginPlatform',
   'connect',
   'disconnect',
   'isConnected',
@@ -81,8 +81,7 @@ function registerTCPClient() {
   for (const method of tcpMethods) {
     ipcMain.handle(`TCPClient-${method}`, async (_event, opts: unknown) => {
       try {
-        const handler = (tcpClient as unknown as AnyRecord)[method] as (opts: AnyRecord) => Promise<unknown>;
-        return await handler((opts ?? {}) as AnyRecord);
+        return await (tcpClient as any)[method]((opts ?? {}) as AnyRecord);
       } catch (err) {
         return { error: true, errorMessage: err instanceof Error ? err.message : String(err) };
       }
@@ -129,7 +128,7 @@ function invoke(method: string, options: Record<string, unknown> = {}) {
 }
 
 const api = {
-  getPlatform: () => invoke('getPlatform'),
+  getPluginPlatform: () => invoke('getPluginPlatform'),
   connect: (options: Record<string, unknown>) => invoke('connect', options),
   disconnect: (options: Record<string, unknown>) => invoke('disconnect', options),
   isConnected: (options: Record<string, unknown>) => invoke('isConnected', options),
@@ -242,6 +241,7 @@ await disconnectListener.remove();
 - **Connectivity (`isConnected()`)**: iOS/Android perform an active EOF check when no stream/RR read is active and may emit `tcpDisconnect` on remote close. Electron performs a fast local socket-state check. The Web stub returns a mock connected state.
 - **Stream suspension:** `suspendStreamDuringRR` (default **true**) temporarily detaches streaming so the RR read can’t be “stolen” by the stream consumer.
 - **Electron API shape:** the root package exposes `TCPClient.createConnection()`. The manual Electron bridge uses low-level methods directly and requires `connectionId` on every call.
+- **Electron single-window:** only the `WebContents` of the last window that registered any TCP event listener receives `tcpData` / `tcpDisconnect` events. Multi-window Electron apps need a custom event fan-out layer in the main process.
 - **Security:** plain **TCP** only (no TLS). Use an external TLS terminator (e.g., stunnel) if you need TLS.
 
 ## FAQ
@@ -295,7 +295,7 @@ so it uses `connectionId` instead of `createConnection()`.
 <docgen-index>
 
 - [`createConnection(...)`](#createconnection)
-- [`getPlatform()`](#getplatform)
+- [`getPluginPlatform()`](#getpluginplatform)
 - [Interfaces](#interfaces)
 - [Type Aliases](#type-aliases)
 
@@ -325,13 +325,13 @@ Create (or retrieve) a TCP connection instance.
 
 ---
 
-### getPlatform()
+### getPluginPlatform()
 
 ```typescript
-getPlatform() => Promise<TcpGetPlatformResult>
+getPluginPlatform() => Promise<TcpGetPlatformResult>
 ```
 
-Returns the platform identifier of the implementation answering calls.
+Returns the platform identifier for this plugin's native implementation (`'ios'` | `'android'` | `'electron'` | `'web'`). Distinct from the Capacitor core `Capacitor.getPlatform()` — use this when you need to know whether the TCP layer is backed by iOS, Android, Electron, or the browser development stub.
 
 **Returns:** <code>Promise&lt;<a href="#tcpgetplatformresult">TcpGetPlatformResult</a>&gt;</code>
 

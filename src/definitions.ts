@@ -227,6 +227,13 @@ export interface TCPClientPlugin {
    */
   createConnection(options?: TcpCreateConnectionOptions): TCPConnection;
 
-  /** Returns the platform identifier of the implementation answering calls. */
-  getPlatform(): Promise<TcpGetPlatformResult>;
+  /**
+   * Returns the platform identifier for this plugin's native implementation
+   * ('ios' | 'android' | 'electron' | 'web').
+   *
+   * Distinct from the Capacitor core `Capacitor.getPlatform()` — use this when
+   * you need to know whether the TCP layer is backed by iOS, Android, Electron,
+   * or the browser development stub.
+   */
+  getPluginPlatform(): Promise<TcpGetPlatformResult>;
 }

@@ -74,7 +74,7 @@ export class TCPClientWeb extends WebPlugin {
     return ok({ bytesSent: data.length, bytesReceived: 0, data: [], matched: false });
   }
 
-  async getPlatform(): Promise<TcpGetPlatformResult> {
+  async getPluginPlatform(): Promise<TcpGetPlatformResult> {
     return ok({ platform: 'web' as const });
   }
 

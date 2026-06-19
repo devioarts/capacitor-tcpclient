@@ -11,7 +11,7 @@
 export const pluginSettings = {
   pluginClass: 'TCPClient',
   pluginMethods: [
-    'getPlatform',
+    'getPluginPlatform',
     'connect',
     'disconnect',
     'isConnected',

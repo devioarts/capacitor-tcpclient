@@ -294,6 +294,10 @@ final class TCPClient {
             guard self.fd >= 0 else { completion(.failure(TcpError.notConnected)); return }
             if self.rrInFlight { completion(.failure(TcpError.busy)); return }
             do {
+                // 3 s budget: only exhausted if the OS send buffer is full AND the remote
+                // stops reading. For typical POS/IoT payloads (≤ a few KB) send() returns
+                // immediately and this timeout is never reached. The connection is NOT
+                // closed on timeout — only an error is returned to the caller.
                 let n = try self.sendAll(bytes, budgetMs: 3000)
                 completion(.success(n))
             } catch {

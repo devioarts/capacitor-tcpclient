@@ -263,6 +263,11 @@ class TCPClientPlugin : Plugin() {
         }
     }
 
+    @PluginMethod
+    fun getPluginPlatform(call: PluginCall) {
+        call.resolve(JSObject().put("error", false).put("errorMessage", JSObject.NULL).put("platform", "android"))
+    }
+
     override fun handleOnDestroy() {
         connections.values.forEach { state ->
             mainHandler.removeCallbacks(state.flushRunnable)

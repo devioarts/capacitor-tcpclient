@@ -500,7 +500,7 @@ export class TCPClient {
     return ok();
   }
 
-  async getPlatform(): Promise<StdOk<{ platform: 'electron' }>> {
+  async getPluginPlatform(): Promise<StdOk<{ platform: 'electron' }>> {
     return ok({ platform: 'electron' as const });
   }
 

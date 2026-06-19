@@ -23,7 +23,7 @@ import type {
 
 // Internal bridge interface — native receives connectionId on every call
 interface _Bridge {
-  getPlatform(): Promise<TcpGetPlatformResult>;
+  getPluginPlatform(): Promise<TcpGetPlatformResult>;
   connect(opts: TcpConnectOptions & { connectionId: string }): Promise<TcpConnectResult>;
   disconnect(opts: { connectionId: string }): Promise<TcpDisconnectResult>;
   isConnected(opts: { connectionId: string }): Promise<TcpIsConnectedResult>;
@@ -168,8 +168,8 @@ const TCPClient: TCPClientPlugin = {
     return conn;
   },
 
-  getPlatform(): Promise<TcpGetPlatformResult> {
-    return _bridge.getPlatform();
+  getPluginPlatform(): Promise<TcpGetPlatformResult> {
+    return _bridge.getPluginPlatform();
   },
 };
 
