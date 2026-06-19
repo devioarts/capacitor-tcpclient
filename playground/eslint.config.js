@@ -6,9 +6,9 @@ import tseslint from 'typescript-eslint'
 import { globalIgnores } from 'eslint/config'
 
 export default tseslint.config([
-  globalIgnores(['dist']),
+  globalIgnores(['dist', 'android', 'ios', 'electron']),
   {
-    files: ['**/*.{ts,tsx}'],
+    files: ['src/**/*.{ts,tsx}', '*.config.ts'],
     extends: [
       js.configs.recommended,
       tseslint.configs.recommended,
@@ -19,9 +19,9 @@ export default tseslint.config([
       ecmaVersion: 2020,
       globals: globals.browser,
     },
-      rules: {
-          "@typescript-eslint/no-explicit-any": "off",
-      }
+    rules: {
+      '@typescript-eslint/no-explicit-any': 'off',
+      'react-refresh/only-export-components': 'off',
+    },
   },
 ])
-

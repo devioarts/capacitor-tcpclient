@@ -64,7 +64,7 @@ class TCPClientPlugin : Plugin() {
         if (port !in 1..65535) {
             call.resolve(JSObject().put("error", true).put("errorMessage", "invalid port").put("connected", false)); return
         }
-        val timeout   = call.getInt("timeout")         ?: 3000
+        val timeout   = (call.getInt("timeout")        ?: 3000).coerceAtLeast(1)
         val noDelay   = call.getBoolean("noDelay")     ?: true
         val keepAlive = call.getBoolean("keepAlive")   ?: true
 
@@ -121,6 +121,9 @@ class TCPClientPlugin : Plugin() {
     fun startRead(call: PluginCall) {
         val id    = requireId(call) ?: return
         val state = connections[id] ?: run {
+            call.resolve(JSObject().put("error", true).put("errorMessage", "not connected").put("reading", false)); return
+        }
+        if (!state.client.isConnected()) {
             call.resolve(JSObject().put("error", true).put("errorMessage", "not connected").put("reading", false)); return
         }
         val chunk = call.getInt("chunkSize") ?: 4096

@@ -3,6 +3,9 @@
 dist
 node_modules
 
+# Generated playground platforms
+playground/electron
+
 # iOS files
 Pods
 Podfile.lock

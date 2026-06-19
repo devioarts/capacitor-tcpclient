@@ -28,27 +28,28 @@ import net = require('net');
 // ---------------------------------------------------------------------------
 
 type ExpectInput = string | number[] | Uint8Array | null | undefined;
+type ParsedExpect = { ok: true; bytes: Uint8Array | null } | { ok: false };
 
-function parseExpectBytes(expect: ExpectInput): Uint8Array | null {
-  if (!expect) return null;
-  if (expect instanceof Uint8Array) return new Uint8Array(expect);
+function parseExpectBytes(expect: ExpectInput): ParsedExpect {
+  if (expect == null || expect === '') return { ok: true, bytes: null };
+  if (expect instanceof Uint8Array) return { ok: true, bytes: new Uint8Array(expect) };
   if (Array.isArray(expect)) {
     const out = new Uint8Array(expect.length);
     for (let i = 0; i < expect.length; i++) out[i] = (expect[i] ?? 0) & 0xff;
-    return out;
+    return { ok: true, bytes: out };
   }
   if (typeof expect === 'string') {
     const clean = expect.replace(/0x/gi, '').replace(/\s+/g, '').toLowerCase();
-    if (!clean || clean.length % 2) return null;
+    if (!clean || clean.length % 2) return { ok: false };
     const out = new Uint8Array(clean.length / 2);
     for (let i = 0; i < clean.length; i += 2) {
       const v = parseInt(clean.slice(i, i + 2), 16);
-      if (Number.isNaN(v)) return null;
+      if (Number.isNaN(v)) return { ok: false };
       out[i / 2] = v & 0xff;
     }
-    return out;
+    return { ok: true, bytes: out };
   }
-  return null;
+  return { ok: false };
 }
 
 // ---------------------------------------------------------------------------
@@ -531,8 +532,16 @@ export class TCPClient {
 
     const timeout = this.positiveInt(args.timeout, st.readTimeout ?? 1000);
     const cap = this.positiveInt(args.maxBytes, 4096);
-    const expectUA = parseExpectBytes(args.expect);
-    const expectBuf = expectUA ? Buffer.from(expectUA) : null;
+    const parsedExpect = parseExpectBytes(args.expect);
+    if (!parsedExpect.ok) {
+      return fail('invalid expect (hex or byte array expected)', {
+        data: [],
+        bytesSent: 0,
+        bytesReceived: 0,
+        matched: false,
+      });
+    }
+    const expectBuf = parsedExpect.bytes ? Buffer.from(parsedExpect.bytes) : null;
 
     const s = st.sock!;
     const wasReading = st.reading;

@@ -7,6 +7,8 @@ export default tseslint.config(
   {
     ignores: [
       'dist/',
+      'electron/dist/',
+      'electron/build/',
       'node_modules/',
       'build/',
       '.build/',

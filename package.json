@@ -63,7 +63,7 @@
     "eslint": "eslint .",
     "prettier": "prettier \"**/*.{css,html,ts,js,java}\" --plugin=prettier-plugin-java",
     "swiftlint": "node-swiftlint",
-    "docgen": "docgen --api TCPClientPlugin --output-readme README.md --output-json dist/docs.json",
+    "docgen": "docgen --api TCPClientPlugin --output-readme README.md --output-json dist/docs.json && node scripts/clean-docgen-readme.cjs",
     "build": "npm run clean && npm run docgen && tsc && rollup -c rollup.config.mjs && npm run build-electron",
     "build-electron": "tsc --project electron/tsconfig.json && rollup -c electron/rollup.config.mjs && rimraf ./electron/build",
     "clean": "rimraf ./dist ./electron/dist ./electron/build",

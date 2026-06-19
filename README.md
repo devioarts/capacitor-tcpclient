@@ -229,15 +229,15 @@ await disconnectListener.remove();
 
 ---
 
-## Technical behavior & guarantees
+## Technical behavior
 
 - **Platforms:** iOS / Android / Electron provide real TCP sockets. The Web implementation is a development stub with the same API shape but no real TCP transport.
 - **Request/Response (`writeAndRead`)**
   - Without `expect`: returns after **until-idle** (adaptive ~50–200 ms) to capture the full reply.
   - With `expect`: returns on first match. If `timeout` expires and **some data arrived**, returns **success** with `matched:false`; if **no data** arrived, returns a **timeout error**.
-- **Timeouts:** `timeout` is the total RR budget. `readTimeout` on **Android** sets `SO_TIMEOUT` for the continuous reader. On **iOS** it’s a no-op (evented I/O). On **Electron** it sets the per-connection default `timeout` used by `writeAndRead` when no explicit `timeout` is passed; the stream reader itself has no timeout.
+- **Timeouts:** `timeout` controls the RR wait budget. On **Electron** it covers the pending RR operation timer. On **iOS**, sending uses the same value as its own write budget and the receive loop then uses that value for the response wait. On **Android**, the socket write is performed before the response wait; the response wait uses `timeout`. `readTimeout` on **Android** sets `SO_TIMEOUT` for the continuous reader. On **iOS** it’s a no-op (evented I/O). On **Electron** it sets the per-connection default `timeout` used by `writeAndRead` when no explicit `timeout` is passed; the stream reader itself has no timeout.
 - **Streaming (`tcpData` events):** native/Electron stream data is micro-batched **every 10 ms or 16 KB**. On Android/iOS, `chunkSize` controls each native socket read before batching; on Electron, the merged batch is split by `chunkSize` before it is sent to the web layer.
-- **Bytes & flags:** `bytesSent` = actually written; on RR timeout it remains the request length, on other errors it’s `0`. `bytesReceived` = length of returned `data`. `matched` = whether `expect` was found.
+- **Bytes & flags:** `bytesSent` is the request length on successful RR calls and timeout-style RR errors; on other RR errors it is `0`. Raw `write()` returns the number of bytes reported by the platform write. `bytesReceived` = length of returned `data`. `matched` = whether `expect` was found.
 - **Connectivity (`isConnected()`)**: iOS/Android perform an active EOF check when no stream/RR read is active and may emit `tcpDisconnect` on remote close. Electron performs a fast local socket-state check. The Web stub returns a mock connected state.
 - **Stream suspension:** `suspendStreamDuringRR` (default **true**) temporarily detaches streaming so the RR read can’t be “stolen” by the stream consumer.
 - **Electron API shape:** the root package exposes `TCPClient.createConnection()`. The manual Electron bridge uses low-level methods directly and requires `connectionId` on every call.
@@ -294,10 +294,10 @@ so it uses `connectionId` instead of `createConnection()`.
 
 <docgen-index>
 
-- [`createConnection(...)`](#createconnection)
-- [`getPluginPlatform()`](#getpluginplatform)
-- [Interfaces](#interfaces)
-- [Type Aliases](#type-aliases)
+* [`createConnection(...)`](#createconnection)
+* [`getPluginPlatform()`](#getpluginplatform)
+* [Interfaces](#interfaces)
+* [Type Aliases](#type-aliases)
 
 </docgen-index>
 
@@ -323,7 +323,8 @@ Create (or retrieve) a TCP connection instance.
 
 **Returns:** <code><a href="#tcpconnection">TCPConnection</a></code>
 
----
+--------------------
+
 
 ### getPluginPlatform()
 
@@ -331,13 +332,20 @@ Create (or retrieve) a TCP connection instance.
 getPluginPlatform() => Promise<TcpGetPlatformResult>
 ```
 
-Returns the platform identifier for this plugin's native implementation (`'ios'` | `'android'` | `'electron'` | `'web'`). Distinct from the Capacitor core `Capacitor.getPlatform()` — use this when you need to know whether the TCP layer is backed by iOS, Android, Electron, or the browser development stub.
+Returns the platform identifier for this plugin's native implementation
+('ios' | 'android' | 'electron' | 'web').
+
+Distinct from the Capacitor core `Capacitor.getPlatform()` — use this when
+you need to know whether the TCP layer is backed by iOS, Android, Electron,
+or the browser development stub.
 
 **Returns:** <code>Promise&lt;<a href="#tcpgetplatformresult">TcpGetPlatformResult</a>&gt;</code>
 
----
+--------------------
+
 
 ### Interfaces
+
 
 #### TCPConnection
 
@@ -364,6 +372,7 @@ Each instance has its own socket, event listeners, and lifecycle.
 | **removeAllListeners** | () =&gt; Promise&lt;void&gt;                                                                                                                                                                       | Remove all listeners registered through this instance.                                                                                                                                                                                                                             |
 | **destroy**            | () =&gt; Promise&lt;void&gt;                                                                                                                                                                       | Disconnect, remove all listeners, and release this instance from the registry.                                                                                                                                                                                                     |
 
+
 #### TcpConnectResult
 
 | Prop               | Type                        |
@@ -371,6 +380,7 @@ Each instance has its own socket, event listeners, and lifecycle.
 | **`error`**        | <code>boolean</code>        |
 | **`errorMessage`** | <code>string \| null</code> |
 | **`connected`**    | <code>boolean</code>        |
+
 
 #### TcpConnectOptions
 
@@ -382,6 +392,7 @@ Each instance has its own socket, event listeners, and lifecycle.
 | **`noDelay`**   | <code>boolean</code> | Enable TCP_NODELAY (Nagle off). Default true.                          |
 | **`keepAlive`** | <code>boolean</code> | Enable SO_KEEPALIVE. Default true.                                     |
 
+
 #### TcpDisconnectResult
 
 | Prop               | Type                        |
@@ -391,6 +402,7 @@ Each instance has its own socket, event listeners, and lifecycle.
 | **`disconnected`** | <code>boolean</code>        |
 | **`reading`**      | <code>boolean</code>        |
 
+
 #### TcpIsConnectedResult
 
 | Prop               | Type                        |
@@ -398,6 +410,7 @@ Each instance has its own socket, event listeners, and lifecycle.
 | **`error`**        | <code>boolean</code>        |
 | **`errorMessage`** | <code>string \| null</code> |
 | **`connected`**    | <code>boolean</code>        |
+
 
 #### TcpIsReadingResult
 
@@ -407,6 +420,7 @@ Each instance has its own socket, event listeners, and lifecycle.
 | **`errorMessage`** | <code>string \| null</code> |
 | **`reading`**      | <code>boolean</code>        |
 
+
 #### TcpWriteResult
 
 | Prop               | Type                        |
@@ -415,82 +429,23 @@ Each instance has its own socket, event listeners, and lifecycle.
 | **`errorMessage`** | <code>string \| null</code> |
 | **`bytesSent`**    | <code>number</code>         |
 
+
 #### TcpWriteOptions
 
-| Prop       | Type                                                          |
-| ---------- | ------------------------------------------------------------- |
-| **`data`** | <code>number[] \| <a href="#uint8array">Uint8Array</a></code> |
+| Prop       | Type                                                      |
+| ---------- | --------------------------------------------------------- |
+| **`data`** | <code><a href="#tcpbytepayload">TcpBytePayload</a></code> |
 
-#### Uint8Array
 
-A typed array of 8-bit unsigned integer values. The contents are initialized to 0. If the
-requested number of bytes could not be allocated an exception is raised.
+#### TcpByteArrayLike
 
-| Prop                    | Type                                                        | Description                                                                  |
-| ----------------------- | ----------------------------------------------------------- | ---------------------------------------------------------------------------- |
-| **`BYTES_PER_ELEMENT`** | <code>number</code>                                         | The size in bytes of each element in the array.                              |
-| **`buffer`**            | <code><a href="#arraybufferlike">ArrayBufferLike</a></code> | The <a href="#arraybuffer">ArrayBuffer</a> instance referenced by the array. |
-| **`byteLength`**        | <code>number</code>                                         | The length in bytes of the array.                                            |
-| **`byteOffset`**        | <code>number</code>                                         | The offset in bytes of the array.                                            |
-| **`length`**            | <code>number</code>                                         | The length of the array.                                                     |
-
-| Method             | Signature                                                                                                                                                                      | Description                                                                                                                                                                                                                                 |
-| ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **copyWithin**     | (target: number, start: number, end?: number \| undefined) =&gt; this                                                                                                          | Returns the this object after copying a section of the array identified by start and end to the same array starting at position target                                                                                                      |
-| **every**          | (predicate: (value: number, index: number, array: <a href="#uint8array">Uint8Array</a>) =&gt; unknown, thisArg?: any) =&gt; boolean                                            | Determines whether all the members of an array satisfy the specified test.                                                                                                                                                                  |
-| **fill**           | (value: number, start?: number \| undefined, end?: number \| undefined) =&gt; this                                                                                             | Returns the this object after filling the section identified by start and end with value                                                                                                                                                    |
-| **filter**         | (predicate: (value: number, index: number, array: <a href="#uint8array">Uint8Array</a>) =&gt; any, thisArg?: any) =&gt; <a href="#uint8array">Uint8Array</a>                   | Returns the elements of an array that meet the condition specified in a callback function.                                                                                                                                                  |
-| **find**           | (predicate: (value: number, index: number, obj: <a href="#uint8array">Uint8Array</a>) =&gt; boolean, thisArg?: any) =&gt; number \| undefined                                  | Returns the value of the first element in the array where predicate is true, and undefined otherwise.                                                                                                                                       |
-| **findIndex**      | (predicate: (value: number, index: number, obj: <a href="#uint8array">Uint8Array</a>) =&gt; boolean, thisArg?: any) =&gt; number                                               | Returns the index of the first element in the array where predicate is true, and -1 otherwise.                                                                                                                                              |
-| **forEach**        | (callbackfn: (value: number, index: number, array: <a href="#uint8array">Uint8Array</a>) =&gt; void, thisArg?: any) =&gt; void                                                 | Performs the specified action for each element in an array.                                                                                                                                                                                 |
-| **indexOf**        | (searchElement: number, fromIndex?: number \| undefined) =&gt; number                                                                                                          | Returns the index of the first occurrence of a value in an array.                                                                                                                                                                           |
-| **join**           | (separator?: string \| undefined) =&gt; string                                                                                                                                 | Adds all the elements of an array separated by the specified separator string.                                                                                                                                                              |
-| **lastIndexOf**    | (searchElement: number, fromIndex?: number \| undefined) =&gt; number                                                                                                          | Returns the index of the last occurrence of a value in an array.                                                                                                                                                                            |
-| **map**            | (callbackfn: (value: number, index: number, array: <a href="#uint8array">Uint8Array</a>) =&gt; number, thisArg?: any) =&gt; <a href="#uint8array">Uint8Array</a>               | Calls a defined callback function on each element of an array, and returns an array that contains the results.                                                                                                                              |
-| **reduce**         | (callbackfn: (previousValue: number, currentValue: number, currentIndex: number, array: <a href="#uint8array">Uint8Array</a>) =&gt; number) =&gt; number                       | Calls the specified callback function for all the elements in an array. The return value of the callback function is the accumulated result, and is provided as an argument in the next call to the callback function.                      |
-| **reduce**         | (callbackfn: (previousValue: number, currentValue: number, currentIndex: number, array: <a href="#uint8array">Uint8Array</a>) =&gt; number, initialValue: number) =&gt; number |                                                                                                                                                                                                                                             |
-| **reduce**         | &lt;U&gt;(callbackfn: (previousValue: U, currentValue: number, currentIndex: number, array: <a href="#uint8array">Uint8Array</a>) =&gt; U, initialValue: U) =&gt; U            | Calls the specified callback function for all the elements in an array. The return value of the callback function is the accumulated result, and is provided as an argument in the next call to the callback function.                      |
-| **reduceRight**    | (callbackfn: (previousValue: number, currentValue: number, currentIndex: number, array: <a href="#uint8array">Uint8Array</a>) =&gt; number) =&gt; number                       | Calls the specified callback function for all the elements in an array, in descending order. The return value of the callback function is the accumulated result, and is provided as an argument in the next call to the callback function. |
-| **reduceRight**    | (callbackfn: (previousValue: number, currentValue: number, currentIndex: number, array: <a href="#uint8array">Uint8Array</a>) =&gt; number, initialValue: number) =&gt; number |                                                                                                                                                                                                                                             |
-| **reduceRight**    | &lt;U&gt;(callbackfn: (previousValue: U, currentValue: number, currentIndex: number, array: <a href="#uint8array">Uint8Array</a>) =&gt; U, initialValue: U) =&gt; U            | Calls the specified callback function for all the elements in an array, in descending order. The return value of the callback function is the accumulated result, and is provided as an argument in the next call to the callback function. |
-| **reverse**        | () =&gt; <a href="#uint8array">Uint8Array</a>                                                                                                                                  | Reverses the elements in an Array.                                                                                                                                                                                                          |
-| **set**            | (array: <a href="#arraylike">ArrayLike</a>&lt;number&gt;, offset?: number \| undefined) =&gt; void                                                                             | Sets a value or an array of values.                                                                                                                                                                                                         |
-| **slice**          | (start?: number \| undefined, end?: number \| undefined) =&gt; <a href="#uint8array">Uint8Array</a>                                                                            | Returns a section of an array.                                                                                                                                                                                                              |
-| **some**           | (predicate: (value: number, index: number, array: <a href="#uint8array">Uint8Array</a>) =&gt; unknown, thisArg?: any) =&gt; boolean                                            | Determines whether the specified callback function returns true for any element of an array.                                                                                                                                                |
-| **sort**           | (compareFn?: ((a: number, b: number) =&gt; number) \| undefined) =&gt; this                                                                                                    | Sorts an array.                                                                                                                                                                                                                             |
-| **subarray**       | (begin?: number \| undefined, end?: number \| undefined) =&gt; <a href="#uint8array">Uint8Array</a>                                                                            | Gets a new <a href="#uint8array">Uint8Array</a> view of the <a href="#arraybuffer">ArrayBuffer</a> store for this array, referencing the elements at begin, inclusive, up to end, exclusive.                                                |
-| **toLocaleString** | () =&gt; string                                                                                                                                                                | Converts a number to a string by using the current locale.                                                                                                                                                                                  |
-| **toString**       | () =&gt; string                                                                                                                                                                | Returns a string representation of an array.                                                                                                                                                                                                |
-| **valueOf**        | () =&gt; <a href="#uint8array">Uint8Array</a>                                                                                                                                  | Returns the primitive value of the specified object.                                                                                                                                                                                        |
-
-#### ArrayLike
+Byte-like array accepted by write APIs.
+Uint8Array is supported because it has numeric indexes and a length.
 
 | Prop         | Type                |
 | ------------ | ------------------- |
 | **`length`** | <code>number</code> |
 
-#### ArrayBufferTypes
-
-Allowed <a href="#arraybuffer">ArrayBuffer</a> types for the buffer of an ArrayBufferView and related Typed Arrays.
-
-| Prop              | Type                                                |
-| ----------------- | --------------------------------------------------- |
-| **`ArrayBuffer`** | <code><a href="#arraybuffer">ArrayBuffer</a></code> |
-
-#### ArrayBuffer
-
-Represents a raw buffer of binary data, which is used to store data for the
-different typed arrays. ArrayBuffers cannot be read from or written to directly,
-but can be passed to a typed array or DataView Object to interpret the raw
-buffer as needed.
-
-| Prop             | Type                | Description                                                                     |
-| ---------------- | ------------------- | ------------------------------------------------------------------------------- |
-| **`byteLength`** | <code>number</code> | Read-only. The length of the <a href="#arraybuffer">ArrayBuffer</a> (in bytes). |
-
-| Method    | Signature                                                                               | Description                                                     |
-| --------- | --------------------------------------------------------------------------------------- | --------------------------------------------------------------- |
-| **slice** | (begin: number, end?: number \| undefined) =&gt; <a href="#arraybuffer">ArrayBuffer</a> | Returns a section of an <a href="#arraybuffer">ArrayBuffer</a>. |
 
 #### TcpWriteAndReadResult
 
@@ -503,15 +458,17 @@ buffer as needed.
 | **`data`**          | <code>number[]</code>       |
 | **`matched`**       | <code>boolean</code>        |
 
+
 #### TcpWriteAndReadOptions
 
-| Prop                        | Type                                                                    | Description                                                                                                                                    |
-| --------------------------- | ----------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
-| **`data`**                  | <code>number[] \| <a href="#uint8array">Uint8Array</a></code>           |                                                                                                                                                |
-| **`timeout`**               | <code>number</code>                                                     | RR timeout in ms. Default 1000.                                                                                                                |
-| **`maxBytes`**              | <code>number</code>                                                     | Maximum bytes to accumulate. Default 4096.                                                                                                     |
-| **`expect`**                | <code>string \| number[] \| <a href="#uint8array">Uint8Array</a></code> | Optional pattern — reading stops when found. Accepts number[] / <a href="#uint8array">Uint8Array</a> or hex string (e.g. "1B40", "0x1b 0x40"). |
-| **`suspendStreamDuringRR`** | <code>boolean</code>                                                    | Suspend stream reader during RR to avoid consuming reply. Default true.                                                                        |
+| Prop                        | Type                                                                | Description                                                                                                          |
+| --------------------------- | ------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| **`data`**                  | <code><a href="#tcpbytepayload">TcpBytePayload</a></code>           |                                                                                                                      |
+| **`timeout`**               | <code>number</code>                                                 | RR timeout in ms. Default 1000.                                                                                      |
+| **`maxBytes`**              | <code>number</code>                                                 | Maximum bytes to accumulate. Default 4096.                                                                           |
+| **`expect`**                | <code>string \| <a href="#tcpbytepayload">TcpBytePayload</a></code> | Optional pattern — reading stops when found. Accepts number[] / Uint8Array or hex string (e.g. "1B40", "0x1b 0x40"). |
+| **`suspendStreamDuringRR`** | <code>boolean</code>                                                | Suspend stream reader during RR to avoid consuming reply. Default true.                                              |
+
 
 #### TcpStartStopResult
 
@@ -521,6 +478,7 @@ buffer as needed.
 | **`errorMessage`** | <code>string \| null</code> |
 | **`reading`**      | <code>boolean</code>        |
 
+
 #### TcpStartReadOptions
 
 | Prop              | Type                | Description                                                                                                                                                                                                            |
@@ -528,11 +486,13 @@ buffer as needed.
 | **`chunkSize`**   | <code>number</code> | Stream read chunk size in bytes. Default 4096. - Android/iOS: size of each native socket read before bridge micro-batching. - Electron: maximum bytes per emitted tcpData event after micro-batching.                  |
 | **`readTimeout`** | <code>number</code> | Stream read timeout in ms. - Android: sets `SO_TIMEOUT` for the continuous reader. - iOS: no-op. - Electron: updates the per-connection default `writeAndRead` timeout; the stream reader itself remains event-driven. |
 
+
 #### PluginListenerHandle
 
 | Prop         | Type                                      |
 | ------------ | ----------------------------------------- |
 | **`remove`** | <code>() =&gt; Promise&lt;void&gt;</code> |
+
 
 #### TcpDataEvent
 
@@ -542,6 +502,7 @@ Emitted by the stream reader. connectionId identifies which connection sent the 
 | ------------------ | --------------------- |
 | **`connectionId`** | <code>string</code>   |
 | **`data`**         | <code>number[]</code> |
+
 
 #### TcpDisconnectEvent
 
@@ -555,6 +516,7 @@ Emitted when a connection closes.
 | **`reason`**       | <code>'error' \| 'manual' \| 'remote'</code> |
 | **`error`**        | <code>string</code>                          |
 
+
 #### TcpCreateConnectionOptions
 
 Options for TCPClient.createConnection().
@@ -565,6 +527,7 @@ defaults for every connect() call on the returned instance.
 | ------------------ | ------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **`connectionId`** | <code>string</code> | Optional stable identifier for this connection. If an instance with this id already exists in the registry, it is returned as-is. Omit to get a new instance with a generated UUID each time. |
 
+
 #### TcpGetPlatformResult
 
 | Prop               | Type                                                |
@@ -573,19 +536,23 @@ defaults for every connect() call on the returned instance.
 | **`errorMessage`** | <code>string \| null</code>                         |
 | **`platform`**     | <code><a href="#tcpplatform">TcpPlatform</a></code> |
 
+
 ### Type Aliases
+
 
 #### Partial
 
 Make all properties in T optional
 
-<code>{
- [P in keyof T]?: T[P];
- }</code>
+<code>{ [P in keyof T]?: T[P]; }</code>
 
-#### ArrayBufferLike
 
-<code>ArrayBufferTypes[keyof ArrayBufferTypes]</code>
+#### TcpBytePayload
+
+Byte payload accepted by write APIs.
+
+<code>number[] | <a href="#tcpbytearraylike">TcpByteArrayLike</a></code>
+
 
 #### TcpPlatform
 

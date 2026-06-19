@@ -79,17 +79,23 @@ npm run cap:open-ios
 
 ## Electron
 
-The main process uses `TCPClient` from the plugin:
-```ts
-import { TCPClient } from "@devioarts/capacitor-tcpclient/electron/tcpclient";
+The playground is intended to run through `@devioarts/capacitor-electron`.
+The `electron/` platform folder is generated, ignored by git, and can be
+recreated at any time with `npx cap-electron add`.
+The browser bundle includes `public/electron-init.js`, which adapts
+`CapacitorCustomPlatform.plugins.TCPClient` for the root package API:
 
-const tcpClient = new TCPClient(win);
+```ts
+import { TCPClient } from "@devioarts/capacitor-tcpclient";
+
+const conn = TCPClient.createConnection({ connectionId: "conn-1" });
 ```
 
-The preload exposes the bridge via `contextBridge`:
-```js
-const { createTCPClientAPI } = require("@devioarts/capacitor-tcpclient/electron/tcpclient-bridge.cjs");
-contextBridge.exposeInMainWorld('TCPClient', createTCPClientAPI({ ipcRenderer }));
+For a plain Electron app without Capacitor Electron, use the manual bridge
+example in the root README. The package export for the main process is:
+
+```ts
+import { TCPClient } from "@devioarts/capacitor-tcpclient/electron";
 ```
 
 ```shell

@@ -86,8 +86,20 @@ export interface TcpStartStopResult {
 
 /* ====== Write (raw) ====== */
 
+/**
+ * Byte-like array accepted by write APIs.
+ * Uint8Array is supported because it has numeric indexes and a length.
+ */
+export interface TcpByteArrayLike {
+  readonly length: number;
+  readonly [index: number]: number;
+}
+
+/** Byte payload accepted by write APIs. */
+export type TcpBytePayload = number[] | TcpByteArrayLike;
+
 export interface TcpWriteOptions {
-  data: number[] | Uint8Array;
+  data: TcpBytePayload;
 }
 
 export interface TcpWriteResult {
@@ -99,7 +111,7 @@ export interface TcpWriteResult {
 /* ====== Write & Read (RR) ====== */
 
 export interface TcpWriteAndReadOptions {
-  data: number[] | Uint8Array;
+  data: TcpBytePayload;
   /** RR timeout in ms. Default 1000. */
   timeout?: number;
   /** Maximum bytes to accumulate. Default 4096. */
@@ -108,7 +120,7 @@ export interface TcpWriteAndReadOptions {
    * Optional pattern — reading stops when found.
    * Accepts number[] / Uint8Array or hex string (e.g. "1B40", "0x1b 0x40").
    */
-  expect?: number[] | Uint8Array | string;
+  expect?: TcpBytePayload | string;
   /** Suspend stream reader during RR to avoid consuming reply. Default true. */
   suspendStreamDuringRR?: boolean;
 }

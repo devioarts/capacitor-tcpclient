@@ -39,13 +39,14 @@
     "cap:sync": "npx cap sync",
     "cap:open-ios": "npx cap open ios",
     "cap:open-android": "npx cap open android",
-    "electron:build": "esbuild electron/main.ts --bundle --platform=node --external:electron --outfile=electron/main.cjs && esbuild electron/preload.ts --bundle --platform=node --external:electron --outfile=electron/preload.cjs",
-    "electron:watch": "esbuild electron/main.ts --bundle --platform=node --external:electron --outfile=electron/main.cjs --watch",
-    "electron:dev": "concurrently \"vite\" \"npm run electron:watch\" \"wait-on http://localhost:5173 && electron electron/main.cjs\"",
-    "electron:dist": "npm run build && npm run electron:build && electron-builder",
-    "electron:dist:win": "npm run build && npm run electron:build && electron-builder -w --x64",
-    "electron:dist:mac": "npm run build && npm run electron:build && electron-builder -m --arm64",
-    "electron:dist:lnx": "npm run build && npm run electron:build && electron-builder -l --x64"
+    "electron:sync": "cap-electron add && cap-electron sync",
+    "electron:copy": "cap-electron add && cap-electron copy",
+    "electron:build": "cap-electron add && npm run dev:build && cap-electron sync && cap-electron copy && cd electron && npm run build",
+    "electron:dev": "cap-electron add && cap-electron open",
+    "electron:dist": "cap-electron add && npm run dev:build && cap-electron sync && cap-electron copy && cd electron && npm run dist",
+    "electron:dist:win": "cap-electron add && npm run dev:build && cap-electron sync && cap-electron copy && cd electron && npm run dist:win",
+    "electron:dist:mac": "cap-electron add && npm run dev:build && cap-electron sync && cap-electron copy && cd electron && npm run dist:mac",
+    "electron:dist:lnx": "cap-electron add && npm run dev:build && cap-electron sync && cap-electron copy && cd electron && npm run dist:linux"
   },
   "dependencies": {
     "@capacitor/android": "^8.4.0",

@@ -16,7 +16,7 @@ public class TCPClientPlugin: CAPPlugin, CAPBridgedPlugin {
         CAPPluginMethod(name: "setReadTimeout", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "writeAndRead", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "destroyConnection", returnType: CAPPluginReturnPromise),
-        CAPPluginMethod(name: "getPluginPlatform", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "getPluginPlatform", returnType: CAPPluginReturnPromise)
     ]
 
     // MARK: - Per-connection state
@@ -145,6 +145,9 @@ public class TCPClientPlugin: CAPPlugin, CAPBridgedPlugin {
             call.resolve(["error": true, "errorMessage": "connectionId is required", "reading": false]); return
         }
         guard let state = connections[connectionId] else {
+            call.resolve(["error": true, "errorMessage": "not connected", "reading": false]); return
+        }
+        guard state.client.isConnected() else {
             call.resolve(["error": true, "errorMessage": "not connected", "reading": false]); return
         }
         let chunk = call.getInt("chunkSize") ?? 4096

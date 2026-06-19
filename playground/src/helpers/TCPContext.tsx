@@ -149,10 +149,10 @@ export const TCPProvider: React.FC<React.PropsWithChildren> = ({ children }) => 
 
   const doStatus = async () => {
     const r = await getConn().isConnected();
-    const p = await TCPClient.getPlatform();
+    const p = await TCPClient.getPluginPlatform();
     setConnected(!!r.connected);
     log.info("client", "isConnected()", r);
-    log.info("client", "getPlatform()", p);
+    log.info("client", "getPluginPlatform()", p);
   };
 
   const doStatusReading = async () => {
@@ -162,8 +162,8 @@ export const TCPProvider: React.FC<React.PropsWithChildren> = ({ children }) => 
   };
 
   const doGetPlatform = async () => {
-    const p = await TCPClient.getPlatform();
-    log.info("client", "getPlatform()", p);
+    const p = await TCPClient.getPluginPlatform();
+    log.info("client", "getPluginPlatform()", p);
   };
 
   const startRead = async () => {

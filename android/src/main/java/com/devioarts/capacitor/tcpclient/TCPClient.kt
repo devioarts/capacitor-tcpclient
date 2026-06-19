@@ -80,7 +80,7 @@ class TCPClient {
                     s.tcpNoDelay = noDelay
                     s.keepAlive = keepAlive
                     try {
-                        s.connect(InetSocketAddress(host, port), timeout)
+                    s.connect(InetSocketAddress(host, port), timeout.coerceAtLeast(1))
                     } catch (e: java.net.SocketTimeoutException) {
                         closeQuietly(pendingSocket)
                         disconnectInternal(DisconnectReason.Error(e))
@@ -105,6 +105,10 @@ class TCPClient {
                         disconnectInternal(DisconnectReason.Error(e))
                         callback(Result.failure(e))
                     }
+                } catch (e: IllegalArgumentException) {
+                    closeQuietly(pendingSocket)
+                    disconnectInternal(DisconnectReason.Error(e))
+                    callback(Result.failure(e))
                 } catch (e: IOException) {
                     closeQuietly(pendingSocket)
                     disconnectInternal(DisconnectReason.Error(e))
