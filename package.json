@@ -1,6 +1,6 @@
 {
   "name": "@devioarts/capacitor-tcpclient",
-  "version": "0.0.4",
+  "version": "0.1.0",
   "description": "TCP Client for Capacitor working on Android, iOS and Electron",
   "keywords": [
     "capacitor",
