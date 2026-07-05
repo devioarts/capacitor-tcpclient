@@ -5,6 +5,8 @@ declare module 'electron' {
     readonly sender: WebContents;
   }
   interface WebContents {
+    isDestroyed(): boolean;
+    once(event: 'destroyed', listener: () => void): this;
     send(channel: string, ...args: unknown[]): void;
   }
   const ipcMain: {

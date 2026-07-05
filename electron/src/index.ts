@@ -146,7 +146,7 @@ export class TCPClient {
 
   constructor() {
     ipcMain.on('event-add-TCPClient', (event, type: unknown) => {
-      this.webContents = event.sender;
+      this.attachWebContents(event.sender);
       const t = type as string;
       this.listenerCounts.set(t, (this.listenerCounts.get(t) ?? 0) + 1);
     });
@@ -160,6 +160,18 @@ export class TCPClient {
 
   // ---- internal helpers ---------------------------------------------------
 
+  private attachWebContents(webContents: WebContents) {
+    if (this.webContents === webContents) return;
+
+    this.webContents = webContents;
+    webContents.once('destroyed', () => {
+      if (this.webContents === webContents) {
+        this.webContents = null;
+        this.listenerCounts.clear();
+      }
+    });
+  }
+
   private getOrCreate(connectionId: string): SocketState {
     let st = this.conns.get(connectionId);
     if (!st) {
@@ -170,8 +182,26 @@ export class TCPClient {
   }
 
   private sendEvent(connectionId: string, name: 'tcpData' | 'tcpDisconnect', payload: object) {
-    if ((this.listenerCounts.get(name) ?? 0) > 0) {
-      this.webContents?.send(`event-TCPClient-${name}`, { connectionId, ...payload });
+    if ((this.listenerCounts.get(name) ?? 0) <= 0) return;
+
+    const webContents = this.webContents;
+    if (!webContents) return;
+
+    if (webContents.isDestroyed()) {
+      if (this.webContents === webContents) {
+        this.webContents = null;
+        this.listenerCounts.clear();
+      }
+      return;
+    }
+
+    try {
+      webContents.send(`event-TCPClient-${name}`, { connectionId, ...payload });
+    } catch {
+      if (this.webContents === webContents) {
+        this.webContents = null;
+        this.listenerCounts.clear();
+      }
     }
   }
 
@@ -296,6 +326,8 @@ export class TCPClient {
     // tear down any existing socket for this connection first
     await this.disconnect({ connectionId });
     const st = this.getOrCreate(connectionId);
+    st.reading = false;
+    st.rrInFlight = false;
 
     return new Promise<Std<{ connected: boolean }>>((resolve) => {
       const s = new net.Socket();
@@ -382,6 +414,8 @@ export class TCPClient {
 
     const s = st.sock;
     st.sock = null;
+    st.reading = false;
+    st.rrInFlight = false;
 
     if (s) {
       this.detachRuntimeSocketHandlers(st, s);
@@ -528,7 +562,6 @@ export class TCPClient {
     if (st.rrInFlight) {
       return fail('busy', { data: [], bytesSent: 0, bytesReceived: 0, matched: false });
     }
-    st.rrInFlight = true;
 
     const timeout = this.positiveInt(args.timeout, st.readTimeout ?? 1000);
     const cap = this.positiveInt(args.maxBytes, 4096);
@@ -542,6 +575,11 @@ export class TCPClient {
       });
     }
     const expectBuf = parsedExpect.bytes ? Buffer.from(parsedExpect.bytes) : null;
+    const reqBuf = this.jsArrToBuf(args.data ?? []);
+    if (!reqBuf) {
+      return fail('data must be an array of bytes', { data: [], bytesSent: 0, bytesReceived: 0, matched: false });
+    }
+    st.rrInFlight = true;
 
     const s = st.sock!;
     const wasReading = st.reading;
@@ -553,14 +591,6 @@ export class TCPClient {
       s.off('data', st.streamDataHandler);
     }
 
-    const reqBuf = this.jsArrToBuf(args.data ?? []);
-    if (!reqBuf) {
-      st.rrInFlight = false;
-      if (shouldSuspend && st.streamDataHandler && st.sock === s && !s.destroyed) {
-        s.on('data', st.streamDataHandler);
-      }
-      return fail('data must be an array of bytes', { data: [], bytesSent: 0, bytesReceived: 0, matched: false });
-    }
     const bytesSent = reqBuf.length;
     let matched = false;
 

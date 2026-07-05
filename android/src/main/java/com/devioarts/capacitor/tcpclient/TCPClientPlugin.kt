@@ -42,6 +42,10 @@ class TCPClientPlugin : Plugin() {
 
     private fun getOrCreate(id: String): ConnState = connections.getOrPut(id) { ConnState(id) }
 
+    private fun runOnMain(action: () -> Unit) {
+        if (Looper.myLooper() == Looper.getMainLooper()) action() else mainHandler.post(action)
+    }
+
     private fun requireId(call: PluginCall): String? {
         val id = call.getString("connectionId")
         if (id.isNullOrEmpty()) {
@@ -72,7 +76,7 @@ class TCPClientPlugin : Plugin() {
             val obj = JSObject()
             if (res.isSuccess) obj.put("error", false).put("errorMessage", JSObject.NULL).put("connected", true)
             else               obj.put("error", true).put("errorMessage", "connect failed: ${res.exceptionOrNull()?.message}").put("connected", false)
-            bridge?.activity?.runOnUiThread { call.resolve(obj) }
+            runOnMain { call.resolve(obj) }
         }
     }
 
@@ -81,7 +85,7 @@ class TCPClientPlugin : Plugin() {
         val id = requireId(call) ?: return
         connections[id]?.let { state ->
             state.client.disconnect()
-            bridge?.activity?.runOnUiThread { flushPendingNow(id) }
+            runOnMain { flushPendingNow(id) }
         }
         call.resolve(JSObject().put("error", false).put("errorMessage", JSObject.NULL).put("disconnected", true).put("reading", false))
     }
@@ -113,7 +117,7 @@ class TCPClientPlugin : Plugin() {
             val obj = JSObject()
             if (res.isSuccess) obj.put("error", false).put("errorMessage", null).put("bytesSent", res.getOrNull())
             else               obj.put("error", true).put("errorMessage", "write failed: ${res.exceptionOrNull()?.message}").put("bytesSent", 0)
-            bridge?.activity?.runOnUiThread { call.resolve(obj) }
+            runOnMain { call.resolve(obj) }
         }
     }
 
@@ -128,7 +132,7 @@ class TCPClientPlugin : Plugin() {
         }
         val chunk = call.getInt("chunkSize") ?: 4096
         call.getInt("readTimeout")?.let { state.client.setReadTimeout(it) }
-        bridge?.activity?.runOnUiThread {
+        runOnMain {
             mainHandler.removeCallbacks(state.flushRunnable)
             state.pending.reset()
         }
@@ -141,7 +145,7 @@ class TCPClientPlugin : Plugin() {
         val id = requireId(call) ?: return
         connections[id]?.let { state ->
             state.client.stopRead()
-            bridge?.activity?.runOnUiThread { flushPendingNow(id) }
+            runOnMain { flushPendingNow(id) }
         }
         call.resolve(JSObject().put("error", false).put("errorMessage", JSObject.NULL).put("reading", false))
     }
@@ -203,7 +207,7 @@ class TCPClientPlugin : Plugin() {
                     .put("bytesSent", if (timedOut) bytes.size else 0).put("bytesReceived", 0)
                     .put("data", JSArray()).put("matched", false)
             }
-            bridge?.activity?.runOnUiThread { call.resolve(obj) }
+            runOnMain { call.resolve(obj) }
         }
     }
 
@@ -220,8 +224,8 @@ class TCPClientPlugin : Plugin() {
     // MARK: - Delegate callbacks
 
     private fun onReceive(id: String, data: ByteArray) {
-        bridge?.activity?.runOnUiThread {
-            val state = connections[id] ?: return@runOnUiThread
+        runOnMain {
+            val state = connections[id] ?: return@runOnMain
             state.pending.write(data)
             if (state.pending.size() >= mergeMaxBytes) {
                 flushPendingNow(id)
@@ -233,14 +237,14 @@ class TCPClientPlugin : Plugin() {
     }
 
     private fun onDisconnect(id: String, reason: TCPClient.DisconnectReason) {
-        bridge?.activity?.runOnUiThread { flushPendingNow(id) }
+        runOnMain { flushPendingNow(id) }
         val payload = JSObject().put("connectionId", id).put("disconnected", true).put("reading", false)
         when (reason) {
             is TCPClient.DisconnectReason.Manual -> payload.put("reason", "manual")
             is TCPClient.DisconnectReason.Remote -> payload.put("reason", "remote")
             is TCPClient.DisconnectReason.Error  -> payload.put("reason", "error").put("error", reason.error.message ?: "error")
         }
-        bridge?.activity?.runOnUiThread { notifyListeners("tcpDisconnect", payload) }
+        runOnMain { notifyListeners("tcpDisconnect", payload) }
     }
 
     // MARK: - Helpers
