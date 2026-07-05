@@ -60,6 +60,24 @@ public class TCPClientPlugin: CAPPlugin, CAPBridgedPlugin {
 
     // MARK: - Registry helpers
 
+    private func dispatchToMainIfNeeded(_ work: @escaping () -> Void) -> Bool {
+        guard !Thread.isMainThread else { return false }
+        DispatchQueue.main.async(execute: work)
+        return true
+    }
+
+    private func writeAndReadBytesSentOnFailure(_ error: Error, requestedByteCount: Int) -> Int {
+        guard let tcpError = error as? TCPClient.TcpError else { return 0 }
+        switch tcpError {
+        case .readTimeout:
+            return requestedByteCount
+        case .writeTimeout(let sent):
+            return sent
+        default:
+            return 0
+        }
+    }
+
     private func getOrCreate(_ id: String) -> ConnState {
         if let existing = connections[id] { return existing }
         let state = ConnState(id: id, plugin: self)
@@ -70,6 +88,7 @@ public class TCPClientPlugin: CAPPlugin, CAPBridgedPlugin {
     // MARK: - API
 
     @objc func connect(_ call: CAPPluginCall) {
+        if dispatchToMainIfNeeded({ self.connect(call) }) { return }
         guard let connectionId = call.getString("connectionId"), !connectionId.isEmpty else {
             call.resolve(["error": true, "errorMessage": "connectionId is required", "connected": false]); return
         }
@@ -96,6 +115,7 @@ public class TCPClientPlugin: CAPPlugin, CAPBridgedPlugin {
     }
 
     @objc func disconnect(_ call: CAPPluginCall) {
+        if dispatchToMainIfNeeded({ self.disconnect(call) }) { return }
         guard let connectionId = call.getString("connectionId"), !connectionId.isEmpty else {
             call.resolve(["error": true, "errorMessage": "connectionId is required", "disconnected": false, "reading": false]); return
         }
@@ -107,6 +127,7 @@ public class TCPClientPlugin: CAPPlugin, CAPBridgedPlugin {
     }
 
     @objc func isConnected(_ call: CAPPluginCall) {
+        if dispatchToMainIfNeeded({ self.isConnected(call) }) { return }
         guard let connectionId = call.getString("connectionId"), !connectionId.isEmpty else {
             call.resolve(["error": true, "errorMessage": "connectionId is required", "connected": false]); return
         }
@@ -115,6 +136,7 @@ public class TCPClientPlugin: CAPPlugin, CAPBridgedPlugin {
     }
 
     @objc func isReading(_ call: CAPPluginCall) {
+        if dispatchToMainIfNeeded({ self.isReading(call) }) { return }
         guard let connectionId = call.getString("connectionId"), !connectionId.isEmpty else {
             call.resolve(["error": true, "errorMessage": "connectionId is required", "reading": false]); return
         }
@@ -123,6 +145,7 @@ public class TCPClientPlugin: CAPPlugin, CAPBridgedPlugin {
     }
 
     @objc func write(_ call: CAPPluginCall) {
+        if dispatchToMainIfNeeded({ self.write(call) }) { return }
         guard let connectionId = call.getString("connectionId"), !connectionId.isEmpty else {
             call.resolve(["error": true, "errorMessage": "connectionId is required", "bytesSent": 0]); return
         }
@@ -141,6 +164,7 @@ public class TCPClientPlugin: CAPPlugin, CAPBridgedPlugin {
     }
 
     @objc func startRead(_ call: CAPPluginCall) {
+        if dispatchToMainIfNeeded({ self.startRead(call) }) { return }
         guard let connectionId = call.getString("connectionId"), !connectionId.isEmpty else {
             call.resolve(["error": true, "errorMessage": "connectionId is required", "reading": false]); return
         }
@@ -159,6 +183,7 @@ public class TCPClientPlugin: CAPPlugin, CAPBridgedPlugin {
     }
 
     @objc func stopRead(_ call: CAPPluginCall) {
+        if dispatchToMainIfNeeded({ self.stopRead(call) }) { return }
         guard let connectionId = call.getString("connectionId"), !connectionId.isEmpty else {
             call.resolve(["error": true, "errorMessage": "connectionId is required", "reading": false]); return
         }
@@ -170,6 +195,7 @@ public class TCPClientPlugin: CAPPlugin, CAPBridgedPlugin {
     }
 
     @objc func setReadTimeout(_ call: CAPPluginCall) {
+        if dispatchToMainIfNeeded({ self.setReadTimeout(call) }) { return }
         // iOS stream reads are event-driven, so readTimeout is accepted for API parity only.
         _ = call.getString("connectionId")
         _ = call.getInt("readTimeout")
@@ -177,6 +203,7 @@ public class TCPClientPlugin: CAPPlugin, CAPBridgedPlugin {
     }
 
     @objc func writeAndRead(_ call: CAPPluginCall) {
+        if dispatchToMainIfNeeded({ self.writeAndRead(call) }) { return }
         guard let connectionId = call.getString("connectionId"), !connectionId.isEmpty else {
             call.resolve(["error": true, "errorMessage": "connectionId is required",
                           "bytesSent": 0, "bytesReceived": 0, "data": [], "matched": false]); return
@@ -207,17 +234,7 @@ public class TCPClientPlugin: CAPPlugin, CAPBridgedPlugin {
                               "bytesSent": bytes.count, "bytesReceived": rrResult.data.count,
                               "data": Array(rrResult.data), "matched": rrResult.matched])
             case .failure(let err):
-                let bytesSent: Int = {
-                    guard let tcpError = err as? TCPClient.TcpError else { return 0 }
-                    switch tcpError {
-                    case .readTimeout:
-                        return bytes.count
-                    case .writeTimeout(let sent):
-                        return sent
-                    default:
-                        return 0
-                    }
-                }()
+                let bytesSent = self.writeAndReadBytesSentOnFailure(err, requestedByteCount: bytes.count)
                 call.resolve(["error": true, "errorMessage": "writeAndRead failed: \(err.localizedDescription)",
                               "bytesSent": bytesSent, "bytesReceived": 0,
                               "data": [], "matched": false])
@@ -226,6 +243,7 @@ public class TCPClientPlugin: CAPPlugin, CAPBridgedPlugin {
     }
 
     @objc func destroyConnection(_ call: CAPPluginCall) {
+        if dispatchToMainIfNeeded({ self.destroyConnection(call) }) { return }
         guard let connectionId = call.getString("connectionId") else { call.resolve(); return }
         if let state = connections.removeValue(forKey: connectionId) {
             state.client.disconnect()
@@ -281,93 +299,4 @@ public class TCPClientPlugin: CAPPlugin, CAPBridgedPlugin {
     }
 
     override public func checkPermissions(_ call: CAPPluginCall) { call.resolve() }
-}
-
-private extension TCPClientPlugin {
-    /// Build an optional byte-pattern matcher from the "expect" call parameter.
-    func buildMatcher(_ call: CAPPluginCall) throws -> ((Data) -> Bool)? {
-        if let hexStr = call.getString("expect") {
-            if hexStr.isEmpty { return nil }
-            let clean = String(hexStr.lowercased()
-                .replacingOccurrences(of: "0x", with: "")
-                .filter { !$0.isWhitespace })
-            guard !clean.isEmpty, clean.count % 2 == 0 else { throw invalidExpectError("invalid expect (hex)") }
-            var pattern = Data(capacity: clean.count / 2)
-            var idx = clean.startIndex
-            while idx < clean.endIndex {
-                let nextIdx = clean.index(idx, offsetBy: 2)
-                guard let byte = UInt8(clean[idx..<nextIdx], radix: 16) else {
-                    throw invalidExpectError("invalid expect (hex)")
-                }
-                pattern.append(byte)
-                idx = nextIdx
-            }
-            return { buf in buf.range(of: pattern) != nil }
-        }
-        if let arr = call.getArray("expect", UInt.self) {
-            let pattern = Data(arr.map { UInt8($0 & 0xff) })
-            return { buf in buf.range(of: pattern) != nil }
-        }
-        if let obj = call.getObject("expect"), let bytes = bytesFromObject(obj) {
-            let pattern = Data(bytes)
-            return { buf in buf.range(of: pattern) != nil }
-        }
-        if hasPresentOption(call, "expect") {
-            throw invalidExpectError("invalid expect (hex or byte array expected)")
-        }
-        return nil
-    }
-
-    func invalidExpectError(_ message: String) -> NSError {
-        NSError(domain: "TCPClientPlugin", code: 1, userInfo: [NSLocalizedDescriptionKey: message])
-    }
-
-    /// Extract bytes from "data" field — accepts number[] or Uint8Array object.
-    func extractBytes(_ call: CAPPluginCall) -> [UInt8]? {
-        if let arr = call.getArray("data", UInt.self) {
-            return arr.map { UInt8($0 & 0xff) }
-        }
-        if let obj = call.getObject("data") { return bytesFromObject(obj) }
-        return nil
-    }
-
-    func byteValue(_ value: Any?) -> UInt8? {
-        guard let value = value, !(value is NSNull) else { return nil }
-        if let number = value as? NSNumber {
-            if CFGetTypeID(number) == CFBooleanGetTypeID() { return nil }
-            let doubleValue = number.doubleValue
-            guard doubleValue.isFinite else { return nil }
-            return UInt8(Int(doubleValue) & 0xff)
-        }
-        if let intValue = value as? Int { return UInt8(intValue & 0xff) }
-        if let uintValue = value as? UInt { return UInt8(uintValue & 0xff) }
-        if let doubleValue = value as? Double, doubleValue.isFinite { return UInt8(Int(doubleValue) & 0xff) }
-        return nil
-    }
-
-    func bytesFromObject(_ obj: JSObject) -> [UInt8]? {
-        let len: Int
-        if let explicitLen = obj["length"] {
-            guard let parsedLen = (explicitLen as? NSNumber)?.intValue ?? explicitLen as? Int, parsedLen >= 0 else {
-                return nil
-            }
-            len = parsedLen
-        } else {
-            let maxIndex = obj.keys.compactMap { Int($0) }.max() ?? -1
-            len = maxIndex + 1
-        }
-
-        var out = [UInt8]()
-        out.reserveCapacity(len)
-        for idx in 0..<len {
-            guard let byte = byteValue(obj["\(idx)"]) else { return nil }
-            out.append(byte)
-        }
-        return out
-    }
-
-    func hasPresentOption(_ call: CAPPluginCall, _ key: String) -> Bool {
-        guard let value = call.options[key] else { return false }
-        return !(value is NSNull)
-    }
 }

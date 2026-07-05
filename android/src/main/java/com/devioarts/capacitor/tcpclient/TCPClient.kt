@@ -20,6 +20,7 @@ import java.io.IOException
 import java.net.InetSocketAddress
 import java.net.Socket
 import java.net.SocketTimeoutException
+import java.net.UnknownHostException
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.cancelAndJoin
 
@@ -40,6 +41,7 @@ class TCPClient {
         object NotConnected : TcpError("not connected")
         object Busy : TcpError("busy")
         object ConnectTimeout : TcpError("connect timeout")
+        object WriteTimeout : TcpError("write timeout")
         object ReadTimeout : TcpError("read timeout")
         object Closed : TcpError("closed")
         object InvalidParams : TcpError("invalid params")
@@ -50,9 +52,10 @@ class TCPClient {
     @Volatile private var output: BufferedOutputStream? = null
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private var readerJob: Job? = null
-    private var lastChunkSize: Int = 4096
-    private var readTimeout: Int = 1000
+    private val readStateLock = Any()
+    @Volatile private var readerJob: Job? = null
+    @Volatile private var lastChunkSize: Int = DEFAULT_CHUNK_SIZE
+    @Volatile private var readTimeout: Int = 1000
     private val rrInFlight = AtomicBoolean(false)
     private val writeMutex = Mutex()
     private val connectMutex = Mutex()
@@ -61,6 +64,11 @@ class TCPClient {
 
     data class ReadResult(val data: ByteArray, val matched: Boolean)
 
+    private companion object {
+        const val DEFAULT_CHUNK_SIZE = 4096
+        const val MAX_BUFFER_BYTES = 16 * 1024 * 1024
+        const val WRITE_TIMEOUT_MS = 3000L
+    }
 
     fun connect(
         host: String,
@@ -71,6 +79,24 @@ class TCPClient {
         callback: (Result<Unit>) -> Unit
     ) {
         scope.launch {
+            val connectTimeout = timeout.coerceAtLeast(1)
+            val address = try {
+                // Resolve before taking connectMutex so slow DNS cannot block
+                // disconnects or other lifecycle operations on this client.
+                withTimeout(connectTimeout.toLong()) {
+                    withContext(Dispatchers.IO) { InetSocketAddress(host, port) }
+                }
+            } catch (e: TimeoutCancellationException) {
+                callback(Result.failure(TcpError.ConnectTimeout)); return@launch
+            } catch (e: IllegalArgumentException) {
+                callback(Result.failure(e)); return@launch
+            } catch (e: SecurityException) {
+                callback(Result.failure(e)); return@launch
+            }
+            if (address.isUnresolved) {
+                callback(Result.failure(UnknownHostException(host))); return@launch
+            }
+
             connectMutex.withLock {
                 disconnectInternal(DisconnectReason.Manual)
                 var pendingSocket: Socket? = null
@@ -80,7 +106,7 @@ class TCPClient {
                     s.tcpNoDelay = noDelay
                     s.keepAlive = keepAlive
                     try {
-                    s.connect(InetSocketAddress(host, port), timeout.coerceAtLeast(1))
+                        s.connect(address, connectTimeout)
                     } catch (e: java.net.SocketTimeoutException) {
                         closeQuietly(pendingSocket)
                         disconnectInternal(DisconnectReason.Error(e))
@@ -131,37 +157,7 @@ class TCPClient {
     fun isConnected(): Boolean {
         val s = socket ?: return false
         // Quick local check of the socket state before deeper probing
-        if (!s.isConnected || s.isClosed || s.inetAddress == null) return false
-
-        // If RR is in flight or the reader is active, avoid touching the input stream
-        if (readerJob?.isActive == true || rrInFlight.get()) return true
-
-        // Non-destructive 1-byte peek: mark(1) + read + reset, with a short SO_TIMEOUT
-        val inp = input ?: return true
-        val oldTimeout = try { s.soTimeout } catch (_: Exception) { 0 }
-        return try {
-            try { s.soTimeout = 5 } catch (_: Exception) {}
-            inp.mark(1)
-            val b = inp.read() // -1 => peer closed (EOF), >=0 => data available
-            if (b == -1) {
-                // Peer closed the connection
-                disconnectInternal(DisconnectReason.Remote)
-                false
-            } else {
-                // Data available; restore it by resetting the stream buffer
-                inp.reset()
-                true
-            }
-        } catch (_: java.net.SocketTimeoutException) {
-            // No data within the short window; connection is still alive
-            true
-        } catch (e: IOException) {
-            // Real I/O error — treat as closed
-            disconnectInternal(DisconnectReason.Error(e))
-            false
-        } finally {
-            try { s.soTimeout = oldTimeout } catch (_: Exception) {}
-        }
+        return s.isConnected && !s.isClosed && s.inetAddress != null
     }
 
 
@@ -175,9 +171,11 @@ class TCPClient {
                     callback(Result.failure(TcpError.Busy)); return@withLock
                 }
                 try {
-                    out.write(bytes)
-                    out.flush()
+                    writeAllWithTimeout(out, bytes, WRITE_TIMEOUT_MS)
                     callback(Result.success(bytes.size))
+                } catch (e: TcpError.WriteTimeout) {
+                    disconnectInternal(DisconnectReason.Error(e))
+                    callback(Result.failure(e))
                 } catch (e: IOException) {
                     disconnectInternal(DisconnectReason.Error(e))
                     callback(Result.failure(e))
@@ -187,22 +185,19 @@ class TCPClient {
     }
 
     fun startRead(chunkSize: Int = 4096) {
-        if (readerJob?.isActive == true) return
         val inp = input ?: return
-        val size = if (chunkSize > 0) chunkSize else 4096
-        lastChunkSize = size
-        try { socket?.soTimeout = if (readTimeout > 0) readTimeout else 1000 } catch (_: Exception) {}
-
-        readerJob = scope.launch {
+        val size = if (chunkSize > 0) chunkSize.coerceAtMost(MAX_BUFFER_BYTES) else DEFAULT_CHUNK_SIZE
+        val job = scope.launch(start = CoroutineStart.LAZY) {
             val buf = ByteArray(size)
             while (isActive) {
                 try {
                     val n = inp.read(buf)
+                    if (!isActive) break
                     if (n == -1) {
                         disconnectInternal(DisconnectReason.Remote)
                         break
                     }
-                    if (n > 0) delegate?.onReceive(buf.copyOf(n))
+                    if (n > 0 && isActive) delegate?.onReceive(buf.copyOf(n))
                 } catch (e: SocketTimeoutException) {
                     // idle tick; keep running
                     continue
@@ -212,19 +207,37 @@ class TCPClient {
                 }
             }
         }
+        synchronized(readStateLock) {
+            if (readerJob?.isActive == true) {
+                job.cancel()
+                return
+            }
+            lastChunkSize = size
+            try { socket?.soTimeout = if (readTimeout > 0) readTimeout else 1000 } catch (_: Exception) {}
+            readerJob = job
+            job.start()
+        }
     }
 
     fun stopRead() {
-        readerJob?.cancel()
-        readerJob = null
-        try { socket?.soTimeout = 0 } catch (_: Exception) {}
+        val job = synchronized(readStateLock) {
+            val current = readerJob
+            readerJob = null
+            try { socket?.soTimeout = 20 } catch (_: Exception) {}
+            current
+        }
+        job?.cancel()
     }
 
     fun isReading(): Boolean = readerJob?.isActive == true
 
     fun setReadTimeout(ms: Int) {
-        readTimeout = if (ms > 0) ms else 1000
-        try { socket?.soTimeout = readTimeout } catch (_: Exception) {}
+        synchronized(readStateLock) {
+            readTimeout = if (ms > 0) ms else 1000
+            if (readerJob?.isActive == true && !rrInFlight.get()) {
+                try { socket?.soTimeout = readTimeout } catch (_: Exception) {}
+            }
+        }
     }
 
     /**
@@ -244,7 +257,7 @@ class TCPClient {
         callback: (Result<ReadResult>) -> Unit
     ) {
         val effTimeout = if (timeout > 0) timeout else 1000
-        val cap = if (maxBytes > 0) maxBytes else 4096
+        val cap = if (maxBytes > 0) maxBytes.coerceAtMost(MAX_BUFFER_BYTES) else DEFAULT_CHUNK_SIZE
         if (!isConnected() || input == null || output == null) {
             callback(Result.failure(TcpError.NotConnected)); return
         }
@@ -255,18 +268,31 @@ class TCPClient {
         scope.launch {
             var wasReading = false
             val previousTimeout: Int = try { socket?.soTimeout ?: 0 } catch (_: Exception) { 0 }
+            val deadlineNs = System.nanoTime() + effTimeout * 1_000_000L
             try {
-                if (suspendStreamDuringRR && readerJob?.isActive == true) {
-                    wasReading = true
-                    readerJob?.cancelAndJoin()
-                    readerJob = null
+                val suspendedReader = synchronized(readStateLock) {
+                    val activeReader = readerJob
+                    if (suspendStreamDuringRR && activeReader?.isActive == true) {
+                        wasReading = true
+                        readerJob = null
+                        try { socket?.soTimeout = 20 } catch (_: Exception) {}
+                        activeReader
+                    } else {
+                        null
+                    }
                 }
+                suspendedReader?.cancelAndJoin()
 
                 // Write request (serialized under writeMutex)
                 writeMutex.withLock {
                     try {
-                        output!!.write(bytes)
-                        output!!.flush()
+                        val remainMs = ((deadlineNs - System.nanoTime()).coerceAtLeast(0)) / 1_000_000L
+                        if (remainMs <= 0) throw TcpError.WriteTimeout
+                        writeAllWithTimeout(output!!, bytes, remainMs)
+                    } catch (e: TcpError.WriteTimeout) {
+                        disconnectInternal(DisconnectReason.Error(e))
+                        callback(Result.failure(e))
+                        return@launch
                     } catch (e: IOException) {
                         disconnectInternal(DisconnectReason.Error(e))
                         callback(Result.failure(e))
@@ -280,8 +306,6 @@ class TCPClient {
                 val tmp = ByteArray(minOf(4096, cap))
                 var used = 0
                 var matched = false
-
-                val deadlineNs = System.nanoTime() + effTimeout * 1_000_000L
 
                 var lastDataAtNs = 0L
                 val interArr = mutableListOf<Long>() // keep last 5 samples
@@ -371,6 +395,26 @@ class TCPClient {
                     startRead(lastChunkSize)
                 }
             }
+        }
+    }
+
+    private suspend fun writeAllWithTimeout(out: BufferedOutputStream, bytes: ByteArray, timeoutMs: Long) {
+        val settled = AtomicBoolean(false)
+        val watchdog = scope.launch {
+            delay(timeoutMs.coerceAtLeast(1))
+            if (settled.compareAndSet(false, true)) {
+                closeQuietly(socket)
+            }
+        }
+        try {
+            out.write(bytes)
+            out.flush()
+            if (!settled.compareAndSet(false, true)) throw TcpError.WriteTimeout
+        } catch (e: IOException) {
+            if (!settled.compareAndSet(false, true)) throw TcpError.WriteTimeout
+            throw e
+        } finally {
+            watchdog.cancel()
         }
     }
 

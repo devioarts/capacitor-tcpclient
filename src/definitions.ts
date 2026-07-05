@@ -15,6 +15,8 @@ import type { PluginListenerHandle } from '@capacitor/core';
  *   or when ~16KB accumulates. Each event carries connectionId so the JS layer can route it.
  * - Defaults: port=9100, connect timeout=3000ms, stream chunkSize=4096 bytes,
  *   RR timeout=1000ms, RR maxBytes=4096, TCP_NODELAY=true, SO_KEEPALIVE=true.
+ * - Byte payloads must contain integer values in the 0..255 range.
+ * - Native/Electron implementations cap stream chunks and RR buffers at 16 MiB.
  */
 
 /* ====== Connect ====== */
@@ -63,7 +65,7 @@ export interface TcpIsReadingResult {
 
 export interface TcpStartReadOptions {
   /**
-   * Stream read chunk size in bytes. Default 4096.
+   * Stream read chunk size in bytes. Default 4096, capped at 16 MiB.
    * - Android/iOS: size of each native socket read before bridge micro-batching.
    * - Electron: maximum bytes per emitted tcpData event after micro-batching.
    */
@@ -95,7 +97,7 @@ export interface TcpByteArrayLike {
   readonly [index: number]: number;
 }
 
-/** Byte payload accepted by write APIs. */
+/** Byte payload accepted by write APIs. Values must be integer bytes in the 0..255 range. */
 export type TcpBytePayload = number[] | TcpByteArrayLike;
 
 export interface TcpWriteOptions {
@@ -112,9 +114,9 @@ export interface TcpWriteResult {
 
 export interface TcpWriteAndReadOptions {
   data: TcpBytePayload;
-  /** RR timeout in ms. Default 1000. */
+  /** RR timeout in ms. Default 1000. Values <= 0 fall back to the default. */
   timeout?: number;
-  /** Maximum bytes to accumulate. Default 4096. */
+  /** Maximum bytes to accumulate. Default 4096, capped at 16 MiB. */
   maxBytes?: number;
   /**
    * Optional pattern — reading stops when found.

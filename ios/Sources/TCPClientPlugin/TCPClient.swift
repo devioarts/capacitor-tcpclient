@@ -13,6 +13,9 @@ protocol TcpClientDelegate: AnyObject {
 /// - Request/Response with timeout, optional pattern match,
 ///   automatic "until idle" (adaptive), and optional stream suspension
 final class TCPClient {
+    private static let defaultChunkSize = 4096
+    private static let maxBufferBytes = 16 * 1024 * 1024
+
     enum TcpError: LocalizedError {
         case notConnected
         case connectTimeout
@@ -51,10 +54,12 @@ final class TCPClient {
     private var fd: Int32 = -1
     private var readSource: DispatchSourceRead?
     private let queue = DispatchQueue(label: "devioarts.tcpclient", qos: .userInitiated)
+    private let signalLock = NSLock()
 
     private var reading = false
     private var rrInFlight = false
-    private var lastChunkSize: Int = 4096
+    private var manualDisconnectRequested = false
+    private var lastChunkSize: Int = TCPClient.defaultChunkSize
 
     weak var delegate: TcpClientDelegate?
 
@@ -191,23 +196,47 @@ final class TCPClient {
         }
     }
 
-    func disconnect() { queue.async { self.disconnectInternal(reason: .manual) } }
+    func disconnect() {
+        requestManualDisconnect()
+        // Wake an in-flight poll/recv in writeAndRead. Teardown still runs on the
+        // serial queue, but shutdown makes the blocking syscall return promptly.
+        let wakeFd = fd
+        if wakeFd >= 0 { _ = shutdown(wakeFd, SHUT_RDWR) }
+        queue.async { self.disconnectInternal(reason: .manual) }
+    }
 
     private func disconnectInternal(reason: DisconnectReason) {
+        let finalReason: DisconnectReason = consumeManualDisconnectRequest() ? .manual : reason
         let had = (fd >= 0) || reading
+        let closeFd = fd
+        fd = -1
         rrInFlight = false
         reading = false
 
         if let src = readSource {
+            src.setCancelHandler {
+                if closeFd >= 0 { close(closeFd) }
+            }
             src.cancel()
             readSource = nil
+        } else if closeFd >= 0 {
+            close(closeFd)
         }
-        if fd >= 0 {
-            _ = shutdown(fd, SHUT_RDWR)
-            close(fd)
-            fd = -1
-        }
-        if had { delegate?.tcpClientDidDisconnect(self, reason: reason) }
+        if had { delegate?.tcpClientDidDisconnect(self, reason: finalReason) }
+    }
+
+    private func requestManualDisconnect() {
+        signalLock.lock()
+        manualDisconnectRequested = true
+        signalLock.unlock()
+    }
+
+    private func consumeManualDisconnectRequest() -> Bool {
+        signalLock.lock()
+        let requested = manualDisconnectRequested
+        manualDisconnectRequested = false
+        signalLock.unlock()
+        return requested
     }
 
     /// Robust connectivity check without a running reader:
@@ -334,7 +363,7 @@ final class TCPClient {
             guard self.fd >= 0 else { return }
             if self.reading { return }
             self.reading = true
-            self.lastChunkSize = max(1, chunkSize)
+            self.lastChunkSize = min(max(1, chunkSize), Self.maxBufferBytes)
 
             let src = DispatchSource.makeReadSource(fileDescriptor: self.fd, queue: self.queue)
             src.setEventHandler { [weak self] in
@@ -415,7 +444,7 @@ final class TCPClient {
             }
 
             // Receive phase with global timeout budget
-            let cap = max(1, maxBytes)
+            let cap = min(max(1, maxBytes), Self.maxBufferBytes)
             var out = Data(capacity: cap)
             var pfd = pollfd(fd: self.fd, events: Int16(POLLIN), revents: 0)
             let receiveDeadline = Date().addingTimeInterval(Double(max(1, timeout)) / 1000.0)
@@ -467,7 +496,7 @@ final class TCPClient {
                     return
                 }
 
-                var tmp = [UInt8](repeating: 0, count: min(4096, cap - out.count))
+                var tmp = [UInt8](repeating: 0, count: min(Self.defaultChunkSize, cap - out.count))
                 let n = tmp.withUnsafeMutableBytes { p -> Int in
                     guard let base = p.baseAddress else { return -1 }
                     return Darwin.recv(self.fd, base, p.count, 0)

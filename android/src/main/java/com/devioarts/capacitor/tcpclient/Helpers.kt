@@ -17,7 +17,7 @@ import org.json.JSONObject
  *
  * Performance notes:
  * - Prefer primitive arrays (IntArray) when constructing a JSArray to avoid per-element boxing.
- * - All conversions mask to 0..255 to stay within byte boundaries expected by JS consumers.
+ * - Incoming JS values must already be integer bytes in the 0..255 range.
  */
 object Helpers {
 
@@ -44,7 +44,8 @@ object Helpers {
             if (!obj.has(key)) return null
             val v = obj.optInt(key, Int.MIN_VALUE)
             if (v == Int.MIN_VALUE) return null
-            out[i] = (v and 0xFF).toByte()
+            if (v !in 0..255) return null
+            out[i] = v.toByte()
         }
         return out
     }
@@ -53,8 +54,7 @@ object Helpers {
      * Convert a Capacitor JSArray (numbers 0..255) into a ByteArray.
      *
      * Expectations:
-     * - Each element is an integer-like value; any fractional part will be truncated by JS before it reaches here.
-     * - Values outside 0..255 are masked with 0xFF to fit into a byte.
+     * - Each element is an integer byte in the 0..255 range.
      *
      * Failure modes:
      * - If the JSArray contains non-numeric entries, JSArray#getInt(i) may throw.
@@ -65,7 +65,8 @@ object Helpers {
         for (i in 0 until len) {
             try {
                 val v = arr.getInt(i)
-                out[i] = (v and 0xFF).toByte()
+                if (v !in 0..255) return null
+                out[i] = v.toByte()
             } catch (_: Exception) {
                 return null
             }

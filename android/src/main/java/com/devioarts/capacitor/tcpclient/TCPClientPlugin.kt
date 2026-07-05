@@ -216,9 +216,9 @@ class TCPClientPlugin : Plugin() {
                     .put("data", Helpers.bytesToJSArray(rr.data)).put("matched", rr.matched)
             } else {
                 val ex = res.exceptionOrNull()
-                val timedOut = ex is TCPClient.TcpError.ConnectTimeout || ex is TCPClient.TcpError.ReadTimeout
+                val bytesSent = if (ex is TCPClient.TcpError.ReadTimeout) bytes.size else 0
                 obj.put("error", true).put("errorMessage", "writeAndRead failed: ${ex?.message}")
-                    .put("bytesSent", if (timedOut) bytes.size else 0).put("bytesReceived", 0)
+                    .put("bytesSent", bytesSent).put("bytesReceived", 0)
                     .put("data", JSArray()).put("matched", false)
             }
             runOnMain { call.resolve(obj) }

@@ -15,7 +15,7 @@ export type ExpectInput = string | number[] | Uint8Array | null | undefined;
  * Rules:
  * - Whitespace and optional "0x" prefixes are ignored for strings.
  * - Hex strings must have even length and contain only [0-9a-f].
- * - number[] values are masked to 0..255.
+ * - number[] values must be integer bytes in the 0..255 range.
  */
 export function parseExpectBytes(expect: ExpectInput): Uint8Array | null {
   if (!expect) return null;
@@ -27,7 +27,11 @@ export function parseExpectBytes(expect: ExpectInput): Uint8Array | null {
 
   if (Array.isArray(expect)) {
     const out = new Uint8Array(expect.length);
-    for (let i = 0; i < expect.length; i++) out[i] = (expect[i] ?? 0) & 0xff;
+    for (let i = 0; i < expect.length; i++) {
+      const value = expect[i];
+      if (!Number.isInteger(value) || value < 0 || value > 255) return null;
+      out[i] = value;
+    }
     return out;
   }
 

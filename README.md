@@ -235,9 +235,9 @@ await disconnectListener.remove();
 - **Request/Response (`writeAndRead`)**
   - Without `expect`: returns after **until-idle** (adaptive ~50–200 ms) to capture the full reply.
   - With `expect`: returns on first match. If `timeout` expires and **some data arrived**, returns **success** with `matched:false`; if **no data** arrived, returns a **timeout error**.
-- **Timeouts:** `timeout` controls the RR wait budget. On **Electron** it covers the pending RR operation timer. On **iOS**, sending uses the same value as its own write budget and the receive loop then uses that value for the response wait. On **Android**, the socket write is performed before the response wait; the response wait uses `timeout`. `readTimeout` on **Android** sets `SO_TIMEOUT` for the continuous reader. On **iOS** it’s a no-op (evented I/O). On **Electron** it sets the per-connection default `timeout` used by `writeAndRead` when no explicit `timeout` is passed; the stream reader itself has no timeout.
-- **Streaming (`tcpData` events):** native/Electron stream data is micro-batched **every 10 ms or 16 KB**. On Android/iOS, `chunkSize` controls each native socket read before batching; on Electron, the merged batch is split by `chunkSize` before it is sent to the web layer.
-- **Bytes & flags:** `bytesSent` is the request length on successful RR calls and timeout-style RR errors; on other RR errors it is `0`. Raw `write()` returns the number of bytes reported by the platform write. `bytesReceived` = length of returned `data`. `matched` = whether `expect` was found.
+- **Timeouts:** `connect.timeout` controls connect/DNS/connect setup where the platform exposes it. `write()` has a native write watchdog. `writeAndRead.timeout` covers send and receive for the RR operation: a write timeout reports `bytesSent:0`; a read timeout after the request was written reports `bytesSent` as the request length. `readTimeout` on **Android** sets `SO_TIMEOUT` for the continuous reader. On **iOS** it’s a no-op (evented I/O). On **Electron** it sets the per-connection default `timeout` used by `writeAndRead` when no explicit `timeout` is passed; the stream reader itself has no timeout.
+- **Streaming (`tcpData` events):** native/Electron stream data is micro-batched **every 10 ms or 16 KB**. On Android/iOS, `chunkSize` controls each native socket read before batching; on Electron, the merged batch is split by `chunkSize` before it is sent to the web layer. Native/Electron implementations clamp stream chunks and RR buffers to **16 MiB**.
+- **Bytes & flags:** byte payloads (`data` and byte-array `expect`) must contain integer values in the **0..255** range. Invalid byte values return an error instead of being masked. `bytesReceived` = length of returned `data`. `matched` = whether `expect` was found.
 - **Connectivity (`isConnected()`)**: iOS/Android perform an active EOF check when no stream/RR read is active and may emit `tcpDisconnect` on remote close. Electron performs a fast local socket-state check. The Web stub returns a mock connected state.
 - **Stream suspension:** `suspendStreamDuringRR` (default **true**) temporarily detaches streaming so the RR read can’t be “stolen” by the stream consumer.
 - **Electron API shape:** the root package exposes `TCPClient.createConnection()`. The manual Electron bridge uses low-level methods directly and requires `connectionId` on every call.
@@ -249,6 +249,7 @@ await disconnectListener.remove();
 - **Why “until-idle” without `expect`?** Many devices reply in fragments; a short adaptive idle window (~50–200 ms) avoids cutting responses.
 - **Why success on `expect` + timeout (with data)?** To avoid dropping partial replies; `matched:false` tells you the pattern didn’t occur.
 - **Why does `readTimeout` behave differently per platform?** On Android, `SO_TIMEOUT` applies to the blocking stream reader. On iOS, evented reads (via `DispatchSourceRead`) make it a no-op. On Electron, it sets the per-connection default `timeout` for `writeAndRead`; the stream reader is event-driven and has no built-in timeout.
+- **Why are byte values strict?** Silent masking turns invalid input into different bytes. The plugin now rejects invalid values so protocol mistakes fail near the caller.
 
 ## Minimal Capacitor usage
 
@@ -464,8 +465,8 @@ Uint8Array is supported because it has numeric indexes and a length.
 | Prop                        | Type                                                                | Description                                                                                                          |
 | --------------------------- | ------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
 | **`data`**                  | <code><a href="#tcpbytepayload">TcpBytePayload</a></code>           |                                                                                                                      |
-| **`timeout`**               | <code>number</code>                                                 | RR timeout in ms. Default 1000.                                                                                      |
-| **`maxBytes`**              | <code>number</code>                                                 | Maximum bytes to accumulate. Default 4096.                                                                           |
+| **`timeout`**               | <code>number</code>                                                 | RR timeout in ms. Default 1000. Values &lt;= 0 fall back to the default.                                             |
+| **`maxBytes`**              | <code>number</code>                                                 | Maximum bytes to accumulate. Default 4096, capped at 16 MiB.                                                         |
 | **`expect`**                | <code>string \| <a href="#tcpbytepayload">TcpBytePayload</a></code> | Optional pattern — reading stops when found. Accepts number[] / Uint8Array or hex string (e.g. "1B40", "0x1b 0x40"). |
 | **`suspendStreamDuringRR`** | <code>boolean</code>                                                | Suspend stream reader during RR to avoid consuming reply. Default true.                                              |
 
@@ -481,10 +482,10 @@ Uint8Array is supported because it has numeric indexes and a length.
 
 #### TcpStartReadOptions
 
-| Prop              | Type                | Description                                                                                                                                                                                                            |
-| ----------------- | ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **`chunkSize`**   | <code>number</code> | Stream read chunk size in bytes. Default 4096. - Android/iOS: size of each native socket read before bridge micro-batching. - Electron: maximum bytes per emitted tcpData event after micro-batching.                  |
-| **`readTimeout`** | <code>number</code> | Stream read timeout in ms. - Android: sets `SO_TIMEOUT` for the continuous reader. - iOS: no-op. - Electron: updates the per-connection default `writeAndRead` timeout; the stream reader itself remains event-driven. |
+| Prop              | Type                | Description                                                                                                                                                                                                             |
+| ----------------- | ------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **`chunkSize`**   | <code>number</code> | Stream read chunk size in bytes. Default 4096, capped at 16 MiB. - Android/iOS: size of each native socket read before bridge micro-batching. - Electron: maximum bytes per emitted tcpData event after micro-batching. |
+| **`readTimeout`** | <code>number</code> | Stream read timeout in ms. - Android: sets `SO_TIMEOUT` for the continuous reader. - iOS: no-op. - Electron: updates the per-connection default `writeAndRead` timeout; the stream reader itself remains event-driven.  |
 
 
 #### PluginListenerHandle
@@ -549,7 +550,7 @@ Make all properties in T optional
 
 #### TcpBytePayload
 
-Byte payload accepted by write APIs.
+Byte payload accepted by write APIs. Values must be integer bytes in the 0..255 range.
 
 <code>number[] | <a href="#tcpbytearraylike">TcpByteArrayLike</a></code>
 

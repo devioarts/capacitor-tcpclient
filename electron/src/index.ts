@@ -37,8 +37,8 @@ function parseExpectBytes(expect: ExpectInput): ParsedExpect {
     const out = new Uint8Array(expect.length);
     for (let i = 0; i < expect.length; i++) {
       const value = expect[i];
-      if (typeof value !== 'number' || !Number.isFinite(value)) return { ok: false };
-      out[i] = value & 0xff;
+      if (!isByte(value)) return { ok: false };
+      out[i] = value;
     }
     return { ok: true, bytes: out };
   }
@@ -65,6 +65,10 @@ type StdOk<T extends object = Empty> = { error: false; errorMessage: null } & T;
 type StdErr<T extends object = Empty> = { error: true; errorMessage: string } & T;
 type Std<T extends object = Empty> = StdOk<T> | StdErr<T>;
 
+function isByte(value: unknown): value is number {
+  return typeof value === 'number' && Number.isInteger(value) && value >= 0 && value <= 255;
+}
+
 function ok(): StdOk<Empty>;
 function ok<T extends object>(extra: T): StdOk<T>;
 function ok<T extends object>(extra?: T) {
@@ -76,6 +80,17 @@ function fail<T extends object>(msg: unknown, extra?: T) {
   const m = (msg as any)?.message ?? (typeof msg === 'string' ? msg : null) ?? String(msg ?? 'Error');
   return { error: true, errorMessage: m, ...(extra ?? ({} as Empty)) };
 }
+
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+const DEFAULT_CHUNK_SIZE = 4096;
+const MAX_BUFFER_BYTES = 16 * 1024 * 1024;
+const MAX_TIMER_MS = 2_147_483_647;
+const WRITE_TIMEOUT_MS = 3000;
+const MERGE_WINDOW_MS = 10;
+const MERGE_MAX_BYTES = 16 * 1024;
 
 // ---------------------------------------------------------------------------
 // Per-connection state
@@ -105,20 +120,13 @@ function makeState(): SocketState {
     rrInFlight: false,
     connectInFlight: false,
     lastSocketError: null,
-    lastChunkSize: 4096,
+    lastChunkSize: DEFAULT_CHUNK_SIZE,
     readTimeout: 1000,
     pendingChunks: [],
     pendingSize: 0,
     flushTimer: null,
   };
 }
-
-// ---------------------------------------------------------------------------
-// Constants
-// ---------------------------------------------------------------------------
-
-const MERGE_WINDOW_MS = 10;
-const MERGE_MAX_BYTES = 16 * 1024;
 
 // ---------------------------------------------------------------------------
 // TCPClient
@@ -226,8 +234,8 @@ export class TCPClient {
     const out = Buffer.alloc(arr.length);
     for (let i = 0; i < arr.length; i++) {
       const value = arr[i];
-      if (typeof value !== 'number' || !Number.isFinite(value)) return null;
-      out[i] = value & 0xff;
+      if (!isByte(value)) return null;
+      out[i] = value;
     }
     return out;
   }
@@ -308,6 +316,55 @@ export class TCPClient {
     }, MERGE_WINDOW_MS);
   }
 
+  private async writeBufferWithTimeout(
+    st: SocketState,
+    s: net.Socket,
+    buf: Buffer,
+    timeoutMs: number,
+  ): Promise<Std<{ bytesSent: number }>> {
+    return new Promise<Std<{ bytesSent: number }>>((resolve) => {
+      let settled = false;
+      let timer: NodeJS.Timeout | null = null;
+
+      // write callback, socket error, close, and watchdog can race; settle once
+      // and leave the permanent lifecycle handler to translate final disconnect.
+      const cleanup = () => {
+        if (timer) {
+          clearTimeout(timer);
+          timer = null;
+        }
+        s.off('error', onError);
+        s.off('close', onClose);
+      };
+
+      const settle = (result: Std<{ bytesSent: number }>, destroySocket = false) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        if (destroySocket && st.sock === s && !s.destroyed) {
+          st.lastSocketError = new Error(result.errorMessage ?? 'write timeout');
+          s.destroy(st.lastSocketError);
+        }
+        resolve(result);
+      };
+
+      const onError = (err: Error) => settle(fail(`write failed: ${err.message}`, { bytesSent: 0 }));
+      const onClose = () => {
+        const err = st.lastSocketError;
+        settle(fail(err ? `connection closed: ${err.message}` : 'connection closed', { bytesSent: 0 }));
+      };
+
+      s.once('error', onError);
+      s.once('close', onClose);
+      timer = setTimeout(() => settle(fail('write timeout', { bytesSent: 0 }), true), timeoutMs);
+
+      s.write(buf, (err) => {
+        if (err) settle(fail(`write failed: ${err.message}`, { bytesSent: 0 }));
+        else settle(ok({ bytesSent: buf.length }));
+      });
+    });
+  }
+
   // ---- IPC handlers -------------------------------------------------------
 
   async connect(args: {
@@ -331,7 +388,7 @@ export class TCPClient {
     if (args.port != null && port !== args.port) {
       return fail('invalid port', { connected: false });
     }
-    const timeout = this.positiveInt(args.timeout, 3000);
+    const timeout = this.positiveInt(args.timeout, 3000, 1, MAX_TIMER_MS);
     const noDelay = args.noDelay ?? true;
     const keepAlive = args.keepAlive ?? true;
     const st = this.getOrCreate(connectionId);
@@ -411,12 +468,9 @@ export class TCPClient {
       s.once('error', onError);
       s.once('close', onClose);
 
-      connectTimer = setTimeout(
-        () => {
-          settle(fail('connect timeout', { connected: false }), true);
-        },
-        Math.max(1, timeout),
-      );
+      connectTimer = setTimeout(() => {
+        settle(fail('connect timeout', { connected: false }), true);
+      }, timeout);
 
       try {
         s.setNoDelay(!!noDelay);
@@ -474,35 +528,7 @@ export class TCPClient {
 
     const buf = this.jsArrToBuf(args.data ?? []);
     if (!buf) return fail('data must be an array of bytes', { bytesSent: 0 });
-    return new Promise<Std<{ bytesSent: number }>>((resolve) => {
-      const s = st.sock!;
-      let settled = false;
-
-      // write callback, socket error, and socket close can race; settle once and detach all
-      // temporary listeners so the permanent socket lifecycle handler remains authoritative.
-      const cleanup = () => {
-        s.off('error', onError);
-        s.off('close', onClose);
-      };
-
-      const settle = (result: Std<{ bytesSent: number }>) => {
-        if (settled) return;
-        settled = true;
-        cleanup();
-        resolve(result);
-      };
-
-      const onError = (err: Error) => settle(fail(`write failed: ${err.message}`, { bytesSent: 0 }));
-      const onClose = () => settle(fail('connection closed', { bytesSent: 0 }));
-
-      s.once('error', onError);
-      s.once('close', onClose);
-
-      s.write(buf, (err) => {
-        if (err) settle(fail(`write failed: ${err.message}`, { bytesSent: 0 }));
-        else settle(ok({ bytesSent: buf.length }));
-      });
-    });
+    return this.writeBufferWithTimeout(st, st.sock, buf, WRITE_TIMEOUT_MS);
   }
 
   async startRead(args: {
@@ -512,12 +538,12 @@ export class TCPClient {
   }): Promise<Std<{ reading: boolean }>> {
     const { connectionId } = args;
     const st = this.conns.get(connectionId);
-    if (!st || !this.isOpen(st) || !st.sock) return ok({ reading: false });
+    if (!st || !this.isOpen(st) || !st.sock) return fail('not connected', { reading: false });
     if (st.reading) return ok({ reading: true });
 
     st.reading = true;
-    st.lastChunkSize = this.positiveInt(args?.chunkSize, 4096);
-    if (args?.readTimeout != null) st.readTimeout = this.positiveInt(args.readTimeout, st.readTimeout);
+    st.lastChunkSize = this.positiveInt(args?.chunkSize, DEFAULT_CHUNK_SIZE, 1, MAX_BUFFER_BYTES);
+    if (args?.readTimeout != null) st.readTimeout = this.positiveInt(args.readTimeout, st.readTimeout, 1, MAX_TIMER_MS);
 
     // reset micro-batch state
     st.pendingChunks = [];
@@ -553,8 +579,8 @@ export class TCPClient {
   }
 
   async setReadTimeout(args: { connectionId: string; readTimeout: number }): Promise<Std> {
-    const st = this.conns.get(args.connectionId);
-    if (st) st.readTimeout = this.positiveInt(args?.readTimeout, 1000);
+    const st = this.getOrCreate(args.connectionId);
+    st.readTimeout = this.positiveInt(args?.readTimeout, 1000, 1, MAX_TIMER_MS);
     return ok();
   }
 
@@ -586,8 +612,8 @@ export class TCPClient {
       return fail('busy', { data: [], bytesSent: 0, bytesReceived: 0, matched: false });
     }
 
-    const timeout = this.positiveInt(args.timeout, st.readTimeout ?? 1000);
-    const cap = this.positiveInt(args.maxBytes, 4096);
+    const timeout = this.positiveInt(args.timeout, st.readTimeout ?? 1000, 1, MAX_TIMER_MS);
+    const cap = this.positiveInt(args.maxBytes, DEFAULT_CHUNK_SIZE, 1, MAX_BUFFER_BYTES);
     const parsedExpect = parseExpectBytes(args.expect);
     if (!parsedExpect.ok) {
       return fail('invalid expect (hex or byte array expected)', {
@@ -623,6 +649,7 @@ export class TCPClient {
         let timer: NodeJS.Timeout | null = null;
         let idleTimer: NodeJS.Timeout | null = null;
         let settled = false;
+        let writeFinished = false;
 
         const chunks: Buffer[] = [];
         let size = 0;
@@ -725,6 +752,12 @@ export class TCPClient {
         };
 
         timer = setTimeout(() => {
+          if (!writeFinished) {
+            st.lastSocketError = new Error('write timeout');
+            if (st.sock === s && !s.destroyed) s.destroy(st.lastSocketError);
+            finish(null, 'write timeout');
+            return;
+          }
           const out = size > 0 ? Buffer.concat(chunks, Math.min(size, cap)) : null;
           if (out) {
             matched = false;
@@ -739,6 +772,7 @@ export class TCPClient {
         s.once('close', onClose);
 
         s.write(reqBuf, (err) => {
+          writeFinished = true;
           if (err) finish(null, `write failed: ${err.message}`);
         });
       },
