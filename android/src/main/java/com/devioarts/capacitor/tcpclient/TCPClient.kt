@@ -169,7 +169,11 @@ class TCPClient {
         scope.launch {
             val out = output ?: run { callback(Result.failure(TcpError.NotConnected)); return@launch }
             if (!isConnected()) { callback(Result.failure(TcpError.NotConnected)); return@launch }
+            if (rrInFlight.get()) { callback(Result.failure(TcpError.Busy)); return@launch }
             writeMutex.withLock {
+                if (rrInFlight.get()) {
+                    callback(Result.failure(TcpError.Busy)); return@withLock
+                }
                 try {
                     out.write(bytes)
                     out.flush()

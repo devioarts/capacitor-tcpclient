@@ -13,14 +13,28 @@ protocol TcpClientDelegate: AnyObject {
 /// - Request/Response with timeout, optional pattern match,
 ///   automatic "until idle" (adaptive), and optional stream suspension
 final class TCPClient {
-    enum TcpError: Error {
+    enum TcpError: LocalizedError {
         case notConnected
         case connectTimeout
+        case writeTimeout(bytesSent: Int)
         case readTimeout
         case closed
         case invalidPort
         case readStopped
         case busy
+
+        var errorDescription: String? {
+            switch self {
+            case .notConnected: return "not connected"
+            case .connectTimeout: return "connect timeout"
+            case .writeTimeout: return "write timeout"
+            case .readTimeout: return "read timeout"
+            case .closed: return "closed"
+            case .invalidPort: return "invalid port"
+            case .readStopped: return "read stopped"
+            case .busy: return "busy"
+            }
+        }
     }
 
     enum DisconnectReason {
@@ -143,6 +157,7 @@ final class TCPClient {
                         } else if prc == 0 {
                             continue
                         } else {
+                            if errno == EINTR { continue }
                             lastErr = errno
                             break
                         }
@@ -208,6 +223,10 @@ final class TCPClient {
             let rc = withUnsafeMutablePointer(to: &p) { poll($0, 1, 0) }
             if rc < 0 {
                 let e = errno
+                if e == EINTR {
+                    ok = true
+                    return
+                }
                 self.disconnectInternal(reason: .error(NSError(domain: NSPOSIXErrorDomain, code: Int(e))))
                 ok = false
                 return
@@ -231,7 +250,7 @@ final class TCPClient {
                 ok = true
             } else {
                 let e = errno
-                ok = (e == EAGAIN || e == EWOULDBLOCK)
+                ok = (e == EAGAIN || e == EWOULDBLOCK || e == EINTR)
                 if !ok {
                     self.disconnectInternal(reason: .error(NSError(domain: NSPOSIXErrorDomain, code: Int(e))))
                 }
@@ -259,6 +278,7 @@ final class TCPClient {
                 continue
             }
             let e = errno
+            if e == EINTR { continue }
             if e == EPIPE {
                 self.disconnectInternal(reason: .remote)
                 throw TcpError.closed
@@ -267,13 +287,14 @@ final class TCPClient {
                 while true {
                     let now = Date()
                     let remain = deadline.timeIntervalSince(now)
-                    if remain <= 0 { throw TcpError.connectTimeout }
+                    if remain <= 0 { throw TcpError.writeTimeout(bytesSent: sent) }
                     let stepSec = min(remain, 0.010) // 10ms
                     var pfd = pollfd(fd: self.fd, events: Int16(POLLOUT), revents: 0)
                     let prc = withUnsafeMutablePointer(to: &pfd) { poll($0, 1, Int32(stepSec * 1000.0)) }
                     if prc > 0 { break }
                     if prc < 0 {
                         let perr = errno
+                        if perr == EINTR { continue }
                         throw NSError(domain: NSPOSIXErrorDomain, code: Int(perr),
                                       userInfo: [NSLocalizedDescriptionKey: String(cString: strerror(perr))])
                     }
@@ -334,6 +355,7 @@ final class TCPClient {
                     } else {
                         let e = errno
                         if e == EAGAIN || e == EWOULDBLOCK { break }
+                        if e == EINTR { continue }
                         self.disconnectInternal(reason: .error(NSError(domain: NSPOSIXErrorDomain, code: Int(e))))
                         break
                     }
@@ -396,7 +418,7 @@ final class TCPClient {
             let cap = max(1, maxBytes)
             var out = Data(capacity: cap)
             var pfd = pollfd(fd: self.fd, events: Int16(POLLIN), revents: 0)
-            var remain = max(1, timeout)
+            let receiveDeadline = Date().addingTimeInterval(Double(max(1, timeout)) / 1000.0)
             var matched = false
 
             // adaptive idle
@@ -413,10 +435,17 @@ final class TCPClient {
                 return max(50, min(200, thr))
             }
 
-            while out.count < cap && remain > 0 {
-                let step = min(remain, 50) // fine-grained to evaluate idle
+            while out.count < cap {
+                let remainingMs = Int(receiveDeadline.timeIntervalSinceNow * 1000.0)
+                if remainingMs <= 0 { break }
+                let step: Int
+                if expect == nil && out.count > 0 {
+                    let idleMs = Int(Date().timeIntervalSince(lastDataTime) * 1000.0)
+                    step = min(remainingMs, max(1, currentIdleThresholdMs() - idleMs))
+                } else {
+                    step = min(remainingMs, 50) // fine-grained to evaluate idle
+                }
                 let rc = withUnsafeMutablePointer(to: &pfd) { poll($0, 1, Int32(step)) }
-                remain -= step
 
                 if rc == 0 {
                     // no new data this tick
@@ -432,6 +461,7 @@ final class TCPClient {
                 }
                 if rc < 0 {
                     let e = errno
+                    if e == EINTR { continue }
                     finish(.failure(NSError(domain: NSPOSIXErrorDomain, code: Int(e))))
                     if suspendStreamDuringRR && wasReading && self.fd >= 0 { self.startRead(chunkSize: self.lastChunkSize) }
                     return
@@ -466,7 +496,7 @@ final class TCPClient {
                     return
                 } else {
                     let e = errno
-                    if e == EAGAIN || e == EWOULDBLOCK { continue }
+                    if e == EAGAIN || e == EWOULDBLOCK || e == EINTR { continue }
                     self.disconnectInternal(reason: .error(NSError(domain: NSPOSIXErrorDomain, code: Int(e))))
                     finish(.failure(NSError(domain: NSPOSIXErrorDomain, code: Int(e))))
                     if suspendStreamDuringRR && wasReading && self.fd >= 0 { self.startRead(chunkSize: self.lastChunkSize) }
@@ -474,7 +504,7 @@ final class TCPClient {
                 }
             }
 
-            if out.isEmpty && !matched && remain <= 0 {
+            if out.isEmpty && !matched && receiveDeadline.timeIntervalSinceNow <= 0 {
                 finish(.failure(TcpError.readTimeout))
             } else {
                 finish(.success(ReadResult(data: out, matched: matched)))

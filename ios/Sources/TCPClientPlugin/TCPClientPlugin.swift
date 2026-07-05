@@ -207,15 +207,19 @@ public class TCPClientPlugin: CAPPlugin, CAPBridgedPlugin {
                               "bytesSent": bytes.count, "bytesReceived": rrResult.data.count,
                               "data": Array(rrResult.data), "matched": rrResult.matched])
             case .failure(let err):
-                let timedOut: Bool = {
-                    guard let tcpError = err as? TCPClient.TcpError else { return false }
+                let bytesSent: Int = {
+                    guard let tcpError = err as? TCPClient.TcpError else { return 0 }
                     switch tcpError {
-                    case .connectTimeout, .readTimeout: return true
-                    default: return false
+                    case .readTimeout:
+                        return bytes.count
+                    case .writeTimeout(let sent):
+                        return sent
+                    default:
+                        return 0
                     }
                 }()
                 call.resolve(["error": true, "errorMessage": "writeAndRead failed: \(err.localizedDescription)",
-                              "bytesSent": timedOut ? bytes.count : 0, "bytesReceived": 0,
+                              "bytesSent": bytesSent, "bytesReceived": 0,
                               "data": [], "matched": false])
             }
         }

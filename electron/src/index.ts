@@ -81,6 +81,7 @@ interface SocketState {
   sock: net.Socket | null;
   reading: boolean;
   rrInFlight: boolean;
+  connectInFlight: boolean;
   streamDataHandler?: (chunk: Buffer) => void;
   socketErrorHandler?: (err: Error) => void;
   onClose?: (hadErr: boolean) => void;
@@ -98,6 +99,7 @@ function makeState(): SocketState {
     sock: null,
     reading: false,
     rrInFlight: false,
+    connectInFlight: false,
     lastSocketError: null,
     lastChunkSize: 4096,
     readTimeout: 1000,
@@ -322,10 +324,15 @@ export class TCPClient {
     const timeout = this.positiveInt(args.timeout, 3000);
     const noDelay = args.noDelay ?? true;
     const keepAlive = args.keepAlive ?? true;
+    const st = this.getOrCreate(connectionId);
+
+    if (st.connectInFlight) {
+      return fail('busy', { connected: false });
+    }
+    st.connectInFlight = true;
 
     // tear down any existing socket for this connection first
     await this.disconnect({ connectionId });
-    const st = this.getOrCreate(connectionId);
     st.reading = false;
     st.rrInFlight = false;
 
@@ -359,6 +366,7 @@ export class TCPClient {
             /* ignore */
           }
         }
+        st.connectInFlight = false;
         resolve(result);
       };
 
@@ -378,8 +386,13 @@ export class TCPClient {
 
       const onConnect = () => {
         if (settled) return;
+        if (st.sock !== s) {
+          settle(fail('connection closed before connect', { connected: false }), true);
+          return;
+        }
         settled = true;
         cleanupConnect();
+        st.connectInFlight = false;
         this.installRuntimeSocketHandlers(connectionId, st, s);
         resolve(ok({ connected: true }));
       };
@@ -584,11 +597,12 @@ export class TCPClient {
     const s = st.sock!;
     const wasReading = st.reading;
     const shouldSuspend = !!(args.suspendStreamDuringRR ?? true) && wasReading;
+    const suspendedStreamDataHandler = shouldSuspend ? st.streamDataHandler : undefined;
 
     // suspend stream reader so it does not consume the reply bytes
-    if (shouldSuspend && st.streamDataHandler) {
+    if (suspendedStreamDataHandler) {
       this.flushPendingNow(connectionId, st);
-      s.off('data', st.streamDataHandler);
+      s.off('data', suspendedStreamDataHandler);
     }
 
     const bytesSent = reqBuf.length;
@@ -637,8 +651,13 @@ export class TCPClient {
           s.off('error', onError);
           s.off('close', onClose);
           // resume stream reader
-          if (shouldSuspend && st.streamDataHandler && st.sock === s && !s.destroyed) {
-            s.on('data', st.streamDataHandler);
+          if (
+            suspendedStreamDataHandler &&
+            st.streamDataHandler === suspendedStreamDataHandler &&
+            st.sock === s &&
+            !s.destroyed
+          ) {
+            s.on('data', suspendedStreamDataHandler);
           }
           st.rrInFlight = false;
 
