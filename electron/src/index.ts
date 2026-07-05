@@ -35,7 +35,11 @@ function parseExpectBytes(expect: ExpectInput): ParsedExpect {
   if (expect instanceof Uint8Array) return { ok: true, bytes: new Uint8Array(expect) };
   if (Array.isArray(expect)) {
     const out = new Uint8Array(expect.length);
-    for (let i = 0; i < expect.length; i++) out[i] = (expect[i] ?? 0) & 0xff;
+    for (let i = 0; i < expect.length; i++) {
+      const value = expect[i];
+      if (typeof value !== 'number' || !Number.isFinite(value)) return { ok: false };
+      out[i] = value & 0xff;
+    }
     return { ok: true, bytes: out };
   }
   if (typeof expect === 'string') {
@@ -219,7 +223,13 @@ export class TCPClient {
   private jsArrToBuf(arr: unknown) {
     if (arr instanceof Uint8Array) return Buffer.from(arr);
     if (!Array.isArray(arr)) return null;
-    return Buffer.from(arr.map((n) => (typeof n === 'number' && Number.isFinite(n) ? n : 0) & 0xff));
+    const out = Buffer.alloc(arr.length);
+    for (let i = 0; i < arr.length; i++) {
+      const value = arr[i];
+      if (typeof value !== 'number' || !Number.isFinite(value)) return null;
+      out[i] = value & 0xff;
+    }
+    return out;
   }
 
   private detachRuntimeSocketHandlers(st: SocketState, s: net.Socket) {

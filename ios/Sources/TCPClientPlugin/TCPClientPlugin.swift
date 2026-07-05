@@ -225,36 +225,6 @@ public class TCPClientPlugin: CAPPlugin, CAPBridgedPlugin {
         }
     }
 
-    /// Build an optional byte-pattern matcher from the "expect" call parameter.
-    private func buildMatcher(_ call: CAPPluginCall) throws -> ((Data) -> Bool)? {
-        if let hexStr = call.getString("expect"), !hexStr.isEmpty {
-            let clean = String(hexStr.lowercased()
-                .replacingOccurrences(of: "0x", with: "")
-                .filter { !$0.isWhitespace })
-            guard !clean.isEmpty, clean.count % 2 == 0 else { throw invalidExpectError("invalid expect (hex)") }
-            var pattern = Data(capacity: clean.count / 2)
-            var idx = clean.startIndex
-            while idx < clean.endIndex {
-                let nextIdx = clean.index(idx, offsetBy: 2)
-                guard let byte = UInt8(clean[idx..<nextIdx], radix: 16) else {
-                    throw invalidExpectError("invalid expect (hex)")
-                }
-                pattern.append(byte)
-                idx = nextIdx
-            }
-            return { buf in buf.range(of: pattern) != nil }
-        }
-        if let arr = call.getArray("expect", UInt.self) {
-            let pattern = Data(arr.map { UInt8($0 & 0xff) })
-            return { buf in buf.range(of: pattern) != nil }
-        }
-        return nil
-    }
-
-    private func invalidExpectError(_ message: String) -> NSError {
-        NSError(domain: "TCPClientPlugin", code: 1, userInfo: [NSLocalizedDescriptionKey: message])
-    }
-
     @objc func destroyConnection(_ call: CAPPluginCall) {
         guard let connectionId = call.getString("connectionId") else { call.resolve(); return }
         if let state = connections.removeValue(forKey: connectionId) {
@@ -306,27 +276,98 @@ public class TCPClientPlugin: CAPPlugin, CAPBridgedPlugin {
         notifyListeners("tcpData", data: ["connectionId": connectionId, "data": payload])
     }
 
-    /// Extract bytes from "data" field — accepts number[] or Uint8Array object.
-    private func extractBytes(_ call: CAPPluginCall) -> [UInt8]? {
-        if let arr = call.getArray("data", UInt.self) {
-            return arr.map { UInt8($0 & 0xff) }
-        }
-        if let obj = call.getObject("data"),
-           let len = obj["length"] as? Int, len > 0 {
-            var out = [UInt8]()
-            out.reserveCapacity(len)
-            for idx in 0..<len {
-                guard let value = obj["\(idx)"] as? Int else { return nil }
-                out.append(UInt8(value & 0xff))
-            }
-            return out
-        }
-        return nil
-    }
-
     @objc func getPluginPlatform(_ call: CAPPluginCall) {
         call.resolve(["error": false, "errorMessage": NSNull(), "platform": "ios"])
     }
 
     override public func checkPermissions(_ call: CAPPluginCall) { call.resolve() }
+}
+
+private extension TCPClientPlugin {
+    /// Build an optional byte-pattern matcher from the "expect" call parameter.
+    func buildMatcher(_ call: CAPPluginCall) throws -> ((Data) -> Bool)? {
+        if let hexStr = call.getString("expect") {
+            if hexStr.isEmpty { return nil }
+            let clean = String(hexStr.lowercased()
+                .replacingOccurrences(of: "0x", with: "")
+                .filter { !$0.isWhitespace })
+            guard !clean.isEmpty, clean.count % 2 == 0 else { throw invalidExpectError("invalid expect (hex)") }
+            var pattern = Data(capacity: clean.count / 2)
+            var idx = clean.startIndex
+            while idx < clean.endIndex {
+                let nextIdx = clean.index(idx, offsetBy: 2)
+                guard let byte = UInt8(clean[idx..<nextIdx], radix: 16) else {
+                    throw invalidExpectError("invalid expect (hex)")
+                }
+                pattern.append(byte)
+                idx = nextIdx
+            }
+            return { buf in buf.range(of: pattern) != nil }
+        }
+        if let arr = call.getArray("expect", UInt.self) {
+            let pattern = Data(arr.map { UInt8($0 & 0xff) })
+            return { buf in buf.range(of: pattern) != nil }
+        }
+        if let obj = call.getObject("expect"), let bytes = bytesFromObject(obj) {
+            let pattern = Data(bytes)
+            return { buf in buf.range(of: pattern) != nil }
+        }
+        if hasPresentOption(call, "expect") {
+            throw invalidExpectError("invalid expect (hex or byte array expected)")
+        }
+        return nil
+    }
+
+    func invalidExpectError(_ message: String) -> NSError {
+        NSError(domain: "TCPClientPlugin", code: 1, userInfo: [NSLocalizedDescriptionKey: message])
+    }
+
+    /// Extract bytes from "data" field — accepts number[] or Uint8Array object.
+    func extractBytes(_ call: CAPPluginCall) -> [UInt8]? {
+        if let arr = call.getArray("data", UInt.self) {
+            return arr.map { UInt8($0 & 0xff) }
+        }
+        if let obj = call.getObject("data") { return bytesFromObject(obj) }
+        return nil
+    }
+
+    func byteValue(_ value: Any?) -> UInt8? {
+        guard let value = value, !(value is NSNull) else { return nil }
+        if let number = value as? NSNumber {
+            if CFGetTypeID(number) == CFBooleanGetTypeID() { return nil }
+            let doubleValue = number.doubleValue
+            guard doubleValue.isFinite else { return nil }
+            return UInt8(Int(doubleValue) & 0xff)
+        }
+        if let intValue = value as? Int { return UInt8(intValue & 0xff) }
+        if let uintValue = value as? UInt { return UInt8(uintValue & 0xff) }
+        if let doubleValue = value as? Double, doubleValue.isFinite { return UInt8(Int(doubleValue) & 0xff) }
+        return nil
+    }
+
+    func bytesFromObject(_ obj: JSObject) -> [UInt8]? {
+        let len: Int
+        if let explicitLen = obj["length"] {
+            guard let parsedLen = (explicitLen as? NSNumber)?.intValue ?? explicitLen as? Int, parsedLen >= 0 else {
+                return nil
+            }
+            len = parsedLen
+        } else {
+            let maxIndex = obj.keys.compactMap { Int($0) }.max() ?? -1
+            len = maxIndex + 1
+        }
+
+        var out = [UInt8]()
+        out.reserveCapacity(len)
+        for idx in 0..<len {
+            guard let byte = byteValue(obj["\(idx)"]) else { return nil }
+            out.append(byte)
+        }
+        return out
+    }
+
+    func hasPresentOption(_ call: CAPPluginCall, _ key: String) -> Bool {
+        guard let value = call.options[key] else { return false }
+        return !(value is NSNull)
+    }
 }

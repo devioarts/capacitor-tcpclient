@@ -36,7 +36,7 @@ object Helpers {
             }
             max + 1
         }
-        if (len <= 0) return null
+        if (len < 0) return null
 
         val out = ByteArray(len)
         for (i in 0 until len) {
@@ -101,7 +101,7 @@ object Helpers {
         val clean = str
             .lowercase()
             .replace(Regex("""0x"""), "")   // strip 0x / 0X
-            .replace(" ", "")               // ignore spaces
+            .replace(Regex("""\s+"""), "")  // ignore whitespace
         if (clean.isEmpty() || clean.length % 2 != 0) return null
         val out = ByteArray(clean.length / 2)
         var i = 0

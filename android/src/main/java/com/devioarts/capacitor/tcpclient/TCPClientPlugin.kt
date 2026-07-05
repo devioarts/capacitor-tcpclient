@@ -176,7 +176,9 @@ class TCPClientPlugin : Plugin() {
 
         var matcher: ((ByteArray, Int) -> Boolean)? = null
         val expectStr = call.getString("expect")
-        if (!expectStr.isNullOrBlank()) {
+        if (expectStr != null && expectStr.isEmpty()) {
+            matcher = null
+        } else if (!expectStr.isNullOrBlank()) {
             val pat = Helpers.hexToBytes(expectStr) ?: run {
                 call.resolve(JSObject().put("error", true).put("errorMessage", "invalid expect (hex)")
                     .put("bytesSent", 0).put("bytesReceived", 0).put("data", JSArray()).put("matched", false)); return
@@ -190,6 +192,18 @@ class TCPClientPlugin : Plugin() {
                         .put("bytesSent", 0).put("bytesReceived", 0).put("data", JSArray()).put("matched", false)); return
                 }
                 matcher = { buf, used -> Helpers.indexOfRange(buf, used, pat) >= 0 }
+            } else {
+                val expectObj = call.getObject("expect")
+                if (expectObj != null) {
+                    val pat = Helpers.jsonObjectToBytes(expectObj) ?: run {
+                        call.resolve(JSObject().put("error", true).put("errorMessage", "invalid expect (byte object)")
+                            .put("bytesSent", 0).put("bytesReceived", 0).put("data", JSArray()).put("matched", false)); return
+                    }
+                    matcher = { buf, used -> Helpers.indexOfRange(buf, used, pat) >= 0 }
+                } else if (call.getData().has("expect") && !call.getData().isNull("expect")) {
+                    call.resolve(JSObject().put("error", true).put("errorMessage", "invalid expect (hex or byte array expected)")
+                        .put("bytesSent", 0).put("bytesReceived", 0).put("data", JSArray()).put("matched", false)); return
+                }
             }
         }
 
