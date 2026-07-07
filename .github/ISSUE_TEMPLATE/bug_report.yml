@@ -1,0 +1,97 @@
+name: Bug report
+description: Report a reproducible problem with the TCP client.
+title: "bug: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a bug. Clear reproduction details make native TCP issues much easier to fix.
+
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      description: Where did you observe the issue?
+      multiple: true
+      options:
+        - Android
+        - iOS
+        - Electron
+        - Web stub
+    validations:
+      required: true
+
+  - type: input
+    id: plugin-version
+    attributes:
+      label: Plugin version
+      placeholder: "0.2.0"
+    validations:
+      required: true
+
+  - type: input
+    id: capacitor-version
+    attributes:
+      label: Capacitor version
+      placeholder: "8.x"
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Include OS/device, emulator/simulator/real device, Electron version, Node version, and any relevant network setup.
+      placeholder: |
+        Android 15 device, Capacitor 8.x, Node 24
+        TCP device: 192.168.1.100:9100
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: Provide the smallest code sample or playground steps that reproduce the issue.
+      render: ts
+      placeholder: |
+        const conn = TCPClient.createConnection({ host: '192.168.1.100', port: 9100 });
+        await conn.connect();
+        const result = await conn.writeAndRead({ data: [0x1b, 0x40], timeout: 1000 });
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What should have happened?
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Include returned objects, errors, logs, and `tcpDisconnect` event payloads when available.
+    validations:
+      required: true
+
+  - type: textarea
+    id: tcp-details
+    attributes:
+      label: TCP details
+      description: Describe the remote server/device behavior, protocol framing, expected bytes, timeouts, and whether streaming or request/response is used.
+      placeholder: |
+        Command bytes:
+        Expected reply:
+        Uses startRead/writeAndRead:
+        Remote closes connection:
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Additional context
+      description: Screenshots, packet captures, logs, or links to a minimal reproduction repository.
