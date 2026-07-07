@@ -21,8 +21,9 @@ npm install @devioarts/capacitor-tcpclient
 npx cap sync
 ```
 
-Add the platform permissions described in [Getting started](docs/getting-started.md)
-before testing on Android or iOS.
+Android network permissions are merged automatically from the plugin manifest.
+See [Getting started](docs/getting-started.md) for manual Android fallback notes
+and the required iOS setup.
 
 ## Quick Start
 
@@ -98,7 +99,7 @@ export async function disconnectFromDevice() {
 
 | Platform | Status | Notes |
 | --- | --- | --- |
-| Android | Native TCP | Requires internet/network permissions |
+| Android | Native TCP | Internet/network permissions are merged automatically |
 | iOS | Native TCP | Requires local network usage description for local devices |
 | Electron | Native TCP | Use Capacitor Electron or the manual bridge |
 | Web | Development stub | Keeps the same API shape, but does not open real TCP sockets |
