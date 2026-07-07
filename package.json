@@ -38,6 +38,7 @@
     "android/src/main/",
     "android/build.gradle",
     "dist/",
+    "docs/",
     "electron/",
     "ios/Sources",
     "ios/Tests",
