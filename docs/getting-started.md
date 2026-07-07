@@ -27,7 +27,12 @@ import { TCPClient } from '@devioarts/capacitor-tcpclient';
 
 ## Android Setup
 
-Add the network permissions to your Android manifest.
+The plugin declares the required Android network permissions in its own
+manifest, so Gradle's Android manifest merger adds them to your app
+automatically during `npx cap sync android` / Android builds.
+
+If you want to declare them manually, or if you are checking a custom native
+setup, add them to your app manifest:
 
 `android/app/src/main/AndroidManifest.xml`
 
