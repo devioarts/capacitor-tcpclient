@@ -17,9 +17,10 @@ import org.json.JSONObject
  *
  * Performance notes:
  * - Prefer primitive arrays (IntArray) when constructing a JSArray to avoid per-element boxing.
- * - All conversions mask to 0..255 to stay within byte boundaries expected by JS consumers.
+ * - Incoming JS values must already be integer bytes in the 0..255 range.
  */
 object Helpers {
+    private const val MAX_BUFFER_BYTES = 16 * 1024 * 1024
 
     /** Build ByteArray from {"0":72, "1":101, ...} (optionally with "length"). Returns null on invalid shape. */
     fun jsonObjectToBytes(obj: JSONObject): ByteArray? {
@@ -36,7 +37,7 @@ object Helpers {
             }
             max + 1
         }
-        if (len <= 0) return null
+        if (len < 0 || len > MAX_BUFFER_BYTES) return null
 
         val out = ByteArray(len)
         for (i in 0 until len) {
@@ -44,7 +45,8 @@ object Helpers {
             if (!obj.has(key)) return null
             val v = obj.optInt(key, Int.MIN_VALUE)
             if (v == Int.MIN_VALUE) return null
-            out[i] = (v and 0xFF).toByte()
+            if (v !in 0..255) return null
+            out[i] = v.toByte()
         }
         return out
     }
@@ -53,19 +55,20 @@ object Helpers {
      * Convert a Capacitor JSArray (numbers 0..255) into a ByteArray.
      *
      * Expectations:
-     * - Each element is an integer-like value; any fractional part will be truncated by JS before it reaches here.
-     * - Values outside 0..255 are masked with 0xFF to fit into a byte.
+     * - Each element is an integer byte in the 0..255 range.
      *
      * Failure modes:
      * - If the JSArray contains non-numeric entries, JSArray#getInt(i) may throw.
      */
     fun jsArrayToBytes(arr: JSArray): ByteArray? {
         val len = arr.length()
+        if (len > MAX_BUFFER_BYTES) return null
         val out = ByteArray(len)
         for (i in 0 until len) {
             try {
                 val v = arr.getInt(i)
-                out[i] = (v and 0xFF).toByte()
+                if (v !in 0..255) return null
+                out[i] = v.toByte()
             } catch (_: Exception) {
                 return null
             }
@@ -101,7 +104,7 @@ object Helpers {
         val clean = str
             .lowercase()
             .replace(Regex("""0x"""), "")   // strip 0x / 0X
-            .replace(" ", "")               // ignore spaces
+            .replace(Regex("""\s+"""), "")  // ignore whitespace
         if (clean.isEmpty() || clean.length % 2 != 0) return null
         val out = ByteArray(clean.length / 2)
         var i = 0

@@ -46,6 +46,24 @@ const _bridge = registerPlugin<_Bridge>('TCPClient', {
   electron: () => Promise.resolve((window as any).CapacitorCustomPlatform.plugins.TCPClient as _Bridge),
 });
 
+const LIFECYCLE_TIMEOUT_MS = 30_000;
+
+function withLifecycleTimeout<T>(promise: Promise<T>, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`${label} timeout`)), LIFECYCLE_TIMEOUT_MS);
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error) => {
+        clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
+}
+
 function _uuid(): string {
   if (typeof crypto !== 'undefined' && typeof (crypto as any).randomUUID === 'function') {
     return (crypto as any).randomUUID() as string;
@@ -77,7 +95,7 @@ class _TCPConnection implements TCPConnection {
   }
 
   disconnect(): Promise<TcpDisconnectResult> {
-    return _bridge.disconnect({ connectionId: this.connectionId });
+    return withLifecycleTimeout(_bridge.disconnect({ connectionId: this.connectionId }), 'disconnect');
   }
 
   isConnected(): Promise<TcpIsConnectedResult> {
@@ -143,17 +161,25 @@ class _TCPConnection implements TCPConnection {
   }
 
   async removeAllListeners(): Promise<void> {
-    await Promise.all(this._handles.map((h) => h.remove()));
+    const handles = [...this._handles];
     this._handles = [];
+    await Promise.all(handles.map((h) => h.remove()));
   }
 
   async destroy(): Promise<void> {
     await this.disconnect().catch(() => {
       /* idempotent — already disconnected is fine */
     });
-    await this.removeAllListeners();
-    _registry.delete(this.connectionId);
-    await _bridge.destroyConnection({ connectionId: this.connectionId });
+    try {
+      await Promise.all(this._handles.map((h) => h.remove().catch(() => undefined)));
+      this._handles = [];
+    } finally {
+      _registry.delete(this.connectionId);
+      await withLifecycleTimeout(
+        _bridge.destroyConnection({ connectionId: this.connectionId }),
+        'destroyConnection',
+      ).catch(() => undefined);
+    }
   }
 }
 

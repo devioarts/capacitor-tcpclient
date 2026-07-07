@@ -42,6 +42,10 @@ class TCPClientPlugin : Plugin() {
 
     private fun getOrCreate(id: String): ConnState = connections.getOrPut(id) { ConnState(id) }
 
+    private fun runOnMain(action: () -> Unit) {
+        if (Looper.myLooper() == Looper.getMainLooper()) action() else mainHandler.post(action)
+    }
+
     private fun requireId(call: PluginCall): String? {
         val id = call.getString("connectionId")
         if (id.isNullOrEmpty()) {
@@ -72,7 +76,7 @@ class TCPClientPlugin : Plugin() {
             val obj = JSObject()
             if (res.isSuccess) obj.put("error", false).put("errorMessage", JSObject.NULL).put("connected", true)
             else               obj.put("error", true).put("errorMessage", "connect failed: ${res.exceptionOrNull()?.message}").put("connected", false)
-            bridge?.activity?.runOnUiThread { call.resolve(obj) }
+            runOnMain { call.resolve(obj) }
         }
     }
 
@@ -80,8 +84,13 @@ class TCPClientPlugin : Plugin() {
     fun disconnect(call: PluginCall) {
         val id = requireId(call) ?: return
         connections[id]?.let { state ->
-            state.client.disconnect()
-            bridge?.activity?.runOnUiThread { flushPendingNow(id) }
+            state.client.disconnect {
+                runOnMain {
+                    flushPendingNow(id)
+                    call.resolve(JSObject().put("error", false).put("errorMessage", JSObject.NULL).put("disconnected", true).put("reading", false))
+                }
+            }
+            return
         }
         call.resolve(JSObject().put("error", false).put("errorMessage", JSObject.NULL).put("disconnected", true).put("reading", false))
     }
@@ -111,9 +120,9 @@ class TCPClientPlugin : Plugin() {
         }
         state.client.write(bytes) { res ->
             val obj = JSObject()
-            if (res.isSuccess) obj.put("error", false).put("errorMessage", null).put("bytesSent", res.getOrNull())
+            if (res.isSuccess) obj.put("error", false).put("errorMessage", JSObject.NULL).put("bytesSent", res.getOrNull())
             else               obj.put("error", true).put("errorMessage", "write failed: ${res.exceptionOrNull()?.message}").put("bytesSent", 0)
-            bridge?.activity?.runOnUiThread { call.resolve(obj) }
+            runOnMain { call.resolve(obj) }
         }
     }
 
@@ -128,7 +137,7 @@ class TCPClientPlugin : Plugin() {
         }
         val chunk = call.getInt("chunkSize") ?: 4096
         call.getInt("readTimeout")?.let { state.client.setReadTimeout(it) }
-        bridge?.activity?.runOnUiThread {
+        runOnMain {
             mainHandler.removeCallbacks(state.flushRunnable)
             state.pending.reset()
         }
@@ -141,7 +150,7 @@ class TCPClientPlugin : Plugin() {
         val id = requireId(call) ?: return
         connections[id]?.let { state ->
             state.client.stopRead()
-            bridge?.activity?.runOnUiThread { flushPendingNow(id) }
+            runOnMain { flushPendingNow(id) }
         }
         call.resolve(JSObject().put("error", false).put("errorMessage", JSObject.NULL).put("reading", false))
     }
@@ -172,7 +181,9 @@ class TCPClientPlugin : Plugin() {
 
         var matcher: ((ByteArray, Int) -> Boolean)? = null
         val expectStr = call.getString("expect")
-        if (!expectStr.isNullOrBlank()) {
+        if (expectStr != null && expectStr.isEmpty()) {
+            matcher = null
+        } else if (!expectStr.isNullOrBlank()) {
             val pat = Helpers.hexToBytes(expectStr) ?: run {
                 call.resolve(JSObject().put("error", true).put("errorMessage", "invalid expect (hex)")
                     .put("bytesSent", 0).put("bytesReceived", 0).put("data", JSArray()).put("matched", false)); return
@@ -185,25 +196,43 @@ class TCPClientPlugin : Plugin() {
                     call.resolve(JSObject().put("error", true).put("errorMessage", "invalid expect (number[])")
                         .put("bytesSent", 0).put("bytesReceived", 0).put("data", JSArray()).put("matched", false)); return
                 }
-                matcher = { buf, used -> Helpers.indexOfRange(buf, used, pat) >= 0 }
+                matcher = if (pat.isEmpty()) null else { buf, used -> Helpers.indexOfRange(buf, used, pat) >= 0 }
+            } else {
+                val expectObj = call.getObject("expect")
+                if (expectObj != null) {
+                    val pat = Helpers.jsonObjectToBytes(expectObj) ?: run {
+                        call.resolve(JSObject().put("error", true).put("errorMessage", "invalid expect (byte object)")
+                            .put("bytesSent", 0).put("bytesReceived", 0).put("data", JSArray()).put("matched", false)); return
+                    }
+                    matcher = if (pat.isEmpty()) null else { buf, used -> Helpers.indexOfRange(buf, used, pat) >= 0 }
+                } else if (call.getData().has("expect") && !call.getData().isNull("expect")) {
+                    call.resolve(JSObject().put("error", true).put("errorMessage", "invalid expect (hex or byte array expected)")
+                        .put("bytesSent", 0).put("bytesReceived", 0).put("data", JSArray()).put("matched", false)); return
+                }
             }
         }
 
         state.client.writeAndRead(bytes, timeout, maxBytes, matcher, suspendRR) { res ->
             val obj = JSObject()
             if (res.isSuccess) {
-                val rr = res.getOrNull()!!
+                val rr = res.getOrNull() ?: run {
+                    obj.put("error", true).put("errorMessage", "writeAndRead failed: missing result")
+                        .put("bytesSent", 0).put("bytesReceived", 0)
+                        .put("data", JSArray()).put("matched", false)
+                    runOnMain { call.resolve(obj) }
+                    return@writeAndRead
+                }
                 obj.put("error", false).put("errorMessage", JSObject.NULL)
                     .put("bytesSent", bytes.size).put("bytesReceived", rr.data.size)
                     .put("data", Helpers.bytesToJSArray(rr.data)).put("matched", rr.matched)
             } else {
                 val ex = res.exceptionOrNull()
-                val timedOut = ex is TCPClient.TcpError.ConnectTimeout || ex is TCPClient.TcpError.ReadTimeout
+                val bytesSent = if (ex is TCPClient.TcpError.ReadTimeout) bytes.size else 0
                 obj.put("error", true).put("errorMessage", "writeAndRead failed: ${ex?.message}")
-                    .put("bytesSent", if (timedOut) bytes.size else 0).put("bytesReceived", 0)
+                    .put("bytesSent", bytesSent).put("bytesReceived", 0)
                     .put("data", JSArray()).put("matched", false)
             }
-            bridge?.activity?.runOnUiThread { call.resolve(obj) }
+            runOnMain { call.resolve(obj) }
         }
     }
 
@@ -212,7 +241,8 @@ class TCPClientPlugin : Plugin() {
         val id = call.getString("connectionId") ?: run { call.resolve(); return }
         connections.remove(id)?.let { state ->
             mainHandler.removeCallbacks(state.flushRunnable)
-            state.client.dispose()
+            state.client.dispose { runOnMain { call.resolve() } }
+            return
         }
         call.resolve()
     }
@@ -220,8 +250,8 @@ class TCPClientPlugin : Plugin() {
     // MARK: - Delegate callbacks
 
     private fun onReceive(id: String, data: ByteArray) {
-        bridge?.activity?.runOnUiThread {
-            val state = connections[id] ?: return@runOnUiThread
+        runOnMain {
+            val state = connections[id] ?: return@runOnMain
             state.pending.write(data)
             if (state.pending.size() >= mergeMaxBytes) {
                 flushPendingNow(id)
@@ -233,14 +263,14 @@ class TCPClientPlugin : Plugin() {
     }
 
     private fun onDisconnect(id: String, reason: TCPClient.DisconnectReason) {
-        bridge?.activity?.runOnUiThread { flushPendingNow(id) }
+        runOnMain { flushPendingNow(id) }
         val payload = JSObject().put("connectionId", id).put("disconnected", true).put("reading", false)
         when (reason) {
             is TCPClient.DisconnectReason.Manual -> payload.put("reason", "manual")
             is TCPClient.DisconnectReason.Remote -> payload.put("reason", "remote")
             is TCPClient.DisconnectReason.Error  -> payload.put("reason", "error").put("error", reason.error.message ?: "error")
         }
-        bridge?.activity?.runOnUiThread { notifyListeners("tcpDisconnect", payload) }
+        runOnMain { notifyListeners("tcpDisconnect", payload) }
     }
 
     // MARK: - Helpers

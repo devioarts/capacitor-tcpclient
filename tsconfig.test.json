@@ -1,0 +1,20 @@
+{
+  "compilerOptions": {
+    "allowUnreachableCode": false,
+    "esModuleInterop": true,
+    "lib": ["dom", "es2020"],
+    "module": "node16",
+    "moduleResolution": "node16",
+    "noFallthroughCasesInSwitch": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "outDir": "build-test",
+    "pretty": true,
+    "rootDir": ".",
+    "skipLibCheck": true,
+    "strict": true,
+    "target": "es2020",
+    "types": ["node"]
+  },
+  "include": ["src/utils/**/*.ts", "electron/src/index.ts", "tests/**/*.test.ts"]
+}
