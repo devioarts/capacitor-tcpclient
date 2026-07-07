@@ -232,7 +232,7 @@ await disconnectListener.remove();
 
 - **Platforms:** iOS / Android / Electron provide real TCP sockets. The Web implementation is a development stub with the same API shape but no real TCP transport.
 - **Request/Response (`writeAndRead`)**
-  - Without `expect`: returns after **until-idle** (adaptive ~50–200 ms) to capture the full reply.
+  - Without `expect`: returns after **until-idle** (adaptive ~100–200 ms) to capture the full reply.
   - With `expect`: returns on first match. If `timeout` expires and **some data arrived**, returns **success** with `matched:false`; if **no data** arrived, returns a **timeout error**.
 - **Timeouts:** `connect.timeout` is the total DNS + socket connect budget on iOS/Android/Electron. `write()` has a native write watchdog. `writeAndRead.timeout` covers send and receive for the RR operation: a write timeout reports `bytesSent:0`; a read timeout after the request was written reports `bytesSent` as the request length. `disconnect()` resolves after native teardown finishes and the JS wrapper also has a 30s lifecycle watchdog for disconnect/destroy cleanup.
 - **Streaming (`tcpData` events):** native/Electron stream data is micro-batched **every 10 ms or 16 KB**. On Android/iOS, `chunkSize` controls each native socket read before batching; on Electron, the merged batch is split by `chunkSize` before it is sent to the web layer. Native/Electron implementations clamp stream chunks and RR buffers to **16 MiB**; Android also enforces a shared native buffer budget across connections.
@@ -246,7 +246,7 @@ await disconnectListener.remove();
 
 ## FAQ
 
-- **Why “until-idle” without `expect`?** Many devices reply in fragments; a short adaptive idle window (~50–200 ms) avoids cutting responses.
+- **Why “until-idle” without `expect`?** Many devices reply in fragments; a short adaptive idle window (~100–200 ms) avoids cutting responses.
 - **Why success on `expect` + timeout (with data)?** To avoid dropping partial replies; `matched:false` tells you the pattern didn’t occur.
 - **What does an empty `expect` mean?** `""`, `[]`, and an empty Uint8Array are treated the same as omitting `expect`, so RR uses adaptive until-idle mode.
 - **Why does `readTimeout` behave differently per platform?** On Android, `SO_TIMEOUT` applies to the blocking stream reader. On iOS, evented reads (via `DispatchSourceRead`) make it a no-op. On Electron, it sets the per-connection default `timeout` for `writeAndRead`; the stream reader is event-driven and has no built-in timeout.

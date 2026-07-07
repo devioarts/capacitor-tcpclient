@@ -18,6 +18,29 @@ class TCPClientTests: XCTestCase {
         XCTAssertFalse(client.isReading())
     }
 
+    func testDisconnectCompletionRunsAfterNativeTeardown() throws {
+        let server = try LoopbackServer { socketFd in
+            usleep(300_000)
+            _ = Darwin.shutdown(socketFd, SHUT_RDWR)
+        }
+        defer { server.close() }
+
+        let client = TCPClient()
+        try connect(client, port: server.port)
+        client.startRead(chunkSize: 4)
+
+        let disconnectExpectation = expectation(description: "disconnect completion")
+        client.disconnect {
+            XCTAssertFalse(client.isConnected())
+            XCTAssertFalse(client.isReading())
+            disconnectExpectation.fulfill()
+        }
+
+        wait(for: [disconnectExpectation], timeout: 2)
+        XCTAssertFalse(client.isConnected())
+        XCTAssertFalse(client.isReading())
+    }
+
     func testStartStopReadWithoutSocketDoesNotEnterReadingState() {
         let client = TCPClient()
         client.startRead(chunkSize: 1024)
@@ -188,8 +211,11 @@ class TCPClientTests: XCTestCase {
     }
 
     private func disconnect(_ client: TCPClient) {
-        client.disconnect()
-        usleep(50_000)
+        let disconnectExpectation = expectation(description: "disconnect")
+        client.disconnect {
+            disconnectExpectation.fulfill()
+        }
+        wait(for: [disconnectExpectation], timeout: 2)
     }
 
     private func waitForWriteAndRead(_ client: TCPClient,

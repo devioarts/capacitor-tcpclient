@@ -121,8 +121,13 @@ public class TCPClientPlugin: CAPPlugin, CAPBridgedPlugin {
             call.resolve(["error": true, "errorMessage": "connectionId is required", "disconnected": false, "reading": false]); return
         }
         if let state = connections[connectionId] {
-            state.client.disconnect()
-            flushPending(connectionId)
+            state.client.disconnect {
+                DispatchQueue.main.async {
+                    self.flushPending(connectionId)
+                    call.resolve(["error": false, "errorMessage": NSNull(), "disconnected": true, "reading": false])
+                }
+            }
+            return
         }
         call.resolve(["error": false, "errorMessage": NSNull(), "disconnected": true, "reading": false])
     }

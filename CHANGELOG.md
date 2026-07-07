@@ -6,6 +6,7 @@
 
 - Hardened iOS socket teardown so manual disconnect reads socket state on the serial queue, wakes in-flight blocking reads, and closes DispatchSource-backed file descriptors from the cancel handler.
 - Serialized iOS `deinit` teardown through the client queue and made `isConnected()` safe when called from that queue.
+- Made iOS plugin `disconnect()` resolve only after native teardown completes, matching the Android lifecycle guarantee.
 - Bounded iOS DNS resolution by the connect timeout and kept the socket connect phase inside the same total timeout budget.
 - Restored the iOS stream reader before resolving `writeAndRead()` promises when RR temporarily suspended streaming.
 - Added iOS byte payload length checks before reserving array capacity and normalized empty byte-array `expect` values to "no expect".
@@ -19,6 +20,7 @@
 - Moved Android DNS resolution out of the serialized connect section and kept DNS plus socket connect inside one timeout budget.
 - Added Android payload length checks and a shared native read/RR buffer budget across connections.
 - Normalized Android empty byte-array/object `expect` values to "no expect" and returned `errorMessage: null` consistently on successful `write()`.
+- Increased the adaptive `writeAndRead()` until-idle floor from 50 ms to 100 ms across Android, iOS, and Electron to reduce premature returns on fragmented replies under scheduler jitter.
 - Added Electron write timeout handling, bounded timers, bounded buffer sizes, and stricter disconnected errors for `startRead()`.
 - Isolated Electron events by `connectionId` so listener cleanup for one connection cannot suppress another connection in the same window.
 - Added an Electron shared I/O in-flight guard so `write()` and `writeAndRead()` cannot interleave on the same socket.
@@ -35,6 +37,7 @@
 - Added Android JVM unit tests for hex parsing, byte validation, pattern matching, and huge object length rejection.
 - Added Android loopback TCP tests for real connect/write/RR/stream behavior, remote close handling, read timeouts, `maxBytes`, and busy guards.
 - Added iOS XCTest loopback TCP tests for real connect/write/RR/stream behavior, remote close handling, read timeouts, `maxBytes`, and busy guards.
+- Added an iOS XCTest regression for disconnect completion ordering after native teardown.
 - Added Android lifecycle JVM tests for dispose callback completion and connect-after-dispose behavior.
 - Added GitHub Actions CI jobs for TypeScript/web build, Android unit tests/build, and iOS build/XCTest.
 - Added an MIT `LICENSE` file to match package metadata.

@@ -81,6 +81,8 @@ class TCPClient {
         const val MAX_BUFFER_BYTES = 16 * 1024 * 1024
         const val MAX_AGGREGATE_BUFFER_BYTES = 64 * 1024 * 1024
         const val WRITE_TIMEOUT_MS = 3000L
+        const val MIN_RR_IDLE_MS = 100
+        const val MAX_RR_IDLE_MS = 200
         val aggregateBufferBytes = AtomicInteger(0)
     }
 
@@ -376,13 +378,13 @@ class TCPClient {
                 val interArr = mutableListOf<Long>() // keep last 5 samples
 
                 fun idleThresholdMs(): Int {
-                    if (interArr.isEmpty()) return 50
+                    if (interArr.isEmpty()) return MIN_RR_IDLE_MS
                     val sorted = interArr.sorted()
                     val med = if (sorted.size % 2 == 1)
                         sorted[sorted.size / 2].toDouble()
                     else
                         0.5 * (sorted[sorted.size / 2 - 1] + sorted[sorted.size / 2]).toDouble()
-                    return (med * 1.75).toInt().coerceIn(50, 200)
+                    return (med * 1.75).toInt().coerceIn(MIN_RR_IDLE_MS, MAX_RR_IDLE_MS)
                 }
 
                 while (used < cap) {

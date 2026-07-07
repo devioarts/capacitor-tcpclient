@@ -92,6 +92,8 @@ const DEFAULT_CHUNK_SIZE = 4096;
 const MAX_BUFFER_BYTES = 16 * 1024 * 1024;
 const MAX_TIMER_MS = 2_147_483_647;
 const WRITE_TIMEOUT_MS = 3000;
+const MIN_RR_IDLE_MS = 100;
+const MAX_RR_IDLE_MS = 200;
 const MERGE_WINDOW_MS = 10;
 const MERGE_MAX_BYTES = 16 * 1024;
 
@@ -674,13 +676,13 @@ export class TCPClient {
         const interArr: number[] = []; // ms intervals, keep last 5
 
         const currentIdleMs = () => {
-          if (interArr.length === 0) return 50;
+          if (interArr.length === 0) return MIN_RR_IDLE_MS;
           const sorted = [...interArr].sort((a, b) => a - b);
           const med =
             sorted.length % 2
               ? sorted[(sorted.length / 2) | 0]
               : 0.5 * (sorted[sorted.length / 2 - 1] + sorted[sorted.length / 2]);
-          return Math.max(50, Math.min(200, Math.round(med * 1.75)));
+          return Math.max(MIN_RR_IDLE_MS, Math.min(MAX_RR_IDLE_MS, Math.round(med * 1.75)));
         };
 
         const armIdle = () => {

@@ -15,6 +15,8 @@ protocol TcpClientDelegate: AnyObject {
 final class TCPClient {
     private static let defaultChunkSize = 4096
     private static let maxBufferBytes = 16 * 1024 * 1024
+    private static let minRequestResponseIdleMs = 100
+    private static let maxRequestResponseIdleMs = 200
     private static let queueKey = DispatchSpecificKey<Void>()
 
     enum TcpError: LocalizedError {
@@ -215,13 +217,16 @@ final class TCPClient {
         }
     }
 
-    func disconnect() {
+    func disconnect(completion: (() -> Void)? = nil) {
         requestManualDisconnect()
         // Wake an in-flight poll/recv in writeAndRead. Teardown still runs on the
         // serial queue, but shutdown makes the blocking syscall return promptly.
         let wakeFd = runOnQueueSync { fd }
         if wakeFd >= 0 { _ = shutdown(wakeFd, SHUT_RDWR) }
-        queue.async { self.disconnectInternal(reason: .manual) }
+        queue.async {
+            self.disconnectInternal(reason: .manual)
+            completion?()
+        }
     }
 
     private func disconnectInternal(reason: DisconnectReason) {
@@ -392,8 +397,8 @@ final class TCPClient {
     // MARK: - Write & wait for pattern (RR) with adaptive "until idle"
 
     /// Automatic "until idle" when `expect == nil`.
-    /// - Starts with base idle 50ms.
-    /// - Tracks inter-arrival times and sets idle = clamp(median * 1.75, 50ms…200ms).
+    /// - Starts with base idle 100ms.
+    /// - Tracks inter-arrival times and sets idle = clamp(median * 1.75, 100ms...200ms).
     func writeAndRead(_ bytes: [UInt8],
                       timeout: Int = 1000,
                       maxBytes: Int = 4096,
@@ -449,13 +454,13 @@ final class TCPClient {
             var interArrivals: [Double] = [] // ms, keep last 5
 
             func currentIdleThresholdMs() -> Int {
-                guard !interArrivals.isEmpty else { return 50 }
+                guard !interArrivals.isEmpty else { return Self.minRequestResponseIdleMs }
                 let sorted = interArrivals.sorted()
                 let med = (sorted.count % 2 == 1)
                     ? sorted[sorted.count/2]
                     : 0.5 * (sorted[sorted.count/2 - 1] + sorted[sorted.count/2])
                 let thr = Int(med * 1.75)
-                return max(50, min(200, thr))
+                return max(Self.minRequestResponseIdleMs, min(Self.maxRequestResponseIdleMs, thr))
             }
 
             while out.count < cap {
