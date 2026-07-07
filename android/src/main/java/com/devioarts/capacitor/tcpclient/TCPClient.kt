@@ -23,6 +23,7 @@ import java.net.SocketTimeoutException
 import java.net.UnknownHostException
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.cancelAndJoin
 
 interface TCPClientDelegate {
@@ -44,6 +45,7 @@ class TCPClient {
         object ConnectTimeout : TcpError("connect timeout")
         object WriteTimeout : TcpError("write timeout")
         object ReadTimeout : TcpError("read timeout")
+        object ConnectSuperseded : TcpError("connect superseded")
         object Closed : TcpError("closed")
         object InvalidParams : TcpError("invalid params")
     }
@@ -62,6 +64,7 @@ class TCPClient {
     @Volatile private var connectionGeneration: Long = 0
     private val disposed = AtomicBoolean(false)
     private val rrInFlight = AtomicBoolean(false)
+    private val connectRequestGeneration = AtomicLong(0)
     private val writeMutex = Mutex()
     private val connectMutex = Mutex()
 
@@ -98,6 +101,8 @@ class TCPClient {
             callback(Result.failure(TcpError.Closed))
             return
         }
+        val requestGeneration = connectRequestGeneration.incrementAndGet()
+        closeQuietly(connectingSocket)
         scope.launch {
             val connectTimeout = timeout.coerceAtLeast(1)
             val deadlineNs = System.nanoTime() + connectTimeout * 1_000_000L
@@ -120,10 +125,16 @@ class TCPClient {
             if (disposed.get()) {
                 callback(Result.failure(TcpError.Closed)); return@launch
             }
+            if (requestGeneration != connectRequestGeneration.get()) {
+                callback(Result.failure(TcpError.ConnectSuperseded)); return@launch
+            }
 
             connectMutex.withLock {
                 if (disposed.get()) {
                     callback(Result.failure(TcpError.Closed)); return@withLock
+                }
+                if (requestGeneration != connectRequestGeneration.get()) {
+                    callback(Result.failure(TcpError.ConnectSuperseded)); return@withLock
                 }
                 val remainingConnectMs = ((deadlineNs - System.nanoTime()).coerceAtLeast(0)) / 1_000_000L
                 if (remainingConnectMs <= 0) {
@@ -137,6 +148,10 @@ class TCPClient {
                     s.tcpNoDelay = noDelay
                     s.keepAlive = keepAlive
                     connectingSocket = s
+                    if (requestGeneration != connectRequestGeneration.get()) {
+                        closeQuietly(pendingSocket)
+                        callback(Result.failure(TcpError.ConnectSuperseded)); return@withLock
+                    }
                     try {
                         s.connect(address, remainingConnectMs.toInt().coerceAtLeast(1))
                     } catch (e: java.net.SocketTimeoutException) {
@@ -157,6 +172,10 @@ class TCPClient {
                     if (disposed.get()) {
                         closeQuietly(pendingSocket)
                         callback(Result.failure(TcpError.Closed)); return@withLock
+                    }
+                    if (requestGeneration != connectRequestGeneration.get()) {
+                        closeQuietly(pendingSocket)
+                        callback(Result.failure(TcpError.ConnectSuperseded)); return@withLock
                     }
                     try {
                         input = BufferedInputStream(s.getInputStream())
@@ -188,6 +207,8 @@ class TCPClient {
             callback?.invoke()
             return
         }
+        connectRequestGeneration.incrementAndGet()
+        closeQuietly(connectingSocket)
         scope.launch {
             withContext(NonCancellable) {
                 connectMutex.withLock {
@@ -199,16 +220,17 @@ class TCPClient {
     }
 
     fun isConnected(): Boolean {
-        val s = socket ?: return false
-        // Quick local check of the socket state before deeper probing
-        return s.isConnected && !s.isClosed && s.inetAddress != null
+        val snapshot = currentSnapshot() ?: return false
+        if (!hasConnectedSocketState(snapshot.socket)) return false
+        if (isReading() || rrInFlight.get()) return true
+        return isIdleSocketAlive(snapshot)
     }
 
 
     fun write(bytes: ByteArray, callback: (Result<Int>) -> Unit) {
         scope.launch {
             val snapshot = currentSnapshot()
-            if (snapshot == null || !isConnected(snapshot.socket)) {
+            if (snapshot == null || !hasConnectedSocketState(snapshot.socket)) {
                 callback(Result.failure(TcpError.NotConnected)); return@launch
             }
             if (rrInFlight.get()) { callback(Result.failure(TcpError.Busy)); return@launch }
@@ -324,7 +346,7 @@ class TCPClient {
 
         scope.launch {
             val snapshot = currentSnapshot()
-            if (snapshot == null || !isConnected(snapshot.socket)) {
+            if (snapshot == null || !hasConnectedSocketState(snapshot.socket)) {
                 rrInFlight.set(false)
                 callback(Result.failure(TcpError.NotConnected)); return@launch
             }
@@ -523,6 +545,7 @@ class TCPClient {
             callback?.invoke()
             return
         }
+        connectRequestGeneration.incrementAndGet()
         cleanupScope.launch {
             closeQuietly(connectingSocket)
             withContext(NonCancellable) {
@@ -543,8 +566,39 @@ class TCPClient {
         return ConnectionSnapshot(s, inp, out, connectionGeneration)
     }
 
-    private fun isConnected(s: Socket): Boolean {
+    private fun hasConnectedSocketState(s: Socket): Boolean {
         return s.isConnected && !s.isClosed && s.inetAddress != null
+    }
+
+    private fun isIdleSocketAlive(snapshot: ConnectionSnapshot): Boolean {
+        val s = snapshot.socket
+        val inp = snapshot.input
+        val previousTimeout = try { s.soTimeout } catch (_: Exception) { 0 }
+        try {
+            try { s.soTimeout = 1 } catch (_: Exception) {}
+            inp.mark(1)
+            val read = inp.read()
+            return when {
+                read == -1 -> {
+                    scope.launch { disconnectIfCurrent(snapshot, DisconnectReason.Remote) }
+                    false
+                }
+                read >= 0 -> {
+                    inp.reset()
+                    true
+                }
+                else -> true
+            }
+        } catch (_: SocketTimeoutException) {
+            return true
+        } catch (e: IOException) {
+            scope.launch { disconnectIfCurrent(snapshot, DisconnectReason.Error(e)) }
+            return false
+        } finally {
+            if (isCurrent(snapshot)) {
+                try { s.soTimeout = previousTimeout } catch (_: Exception) {}
+            }
+        }
     }
 
     private fun isCurrent(snapshot: ConnectionSnapshot): Boolean {

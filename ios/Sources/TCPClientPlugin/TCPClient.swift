@@ -22,6 +22,7 @@ final class TCPClient {
     enum TcpError: LocalizedError {
         case notConnected
         case connectTimeout
+        case connectSuperseded
         case writeTimeout(bytesSent: Int)
         case readTimeout
         case closed
@@ -33,6 +34,7 @@ final class TCPClient {
             switch self {
             case .notConnected: return "not connected"
             case .connectTimeout: return "connect timeout"
+            case .connectSuperseded: return "connect superseded"
             case .writeTimeout: return "write timeout"
             case .readTimeout: return "read timeout"
             case .closed: return "closed"
@@ -64,6 +66,7 @@ final class TCPClient {
     private var rrInFlight = false
     private var operationInFlight = false
     private var manualDisconnectRequested = false
+    private var connectRequestGeneration: UInt64 = 0
     private var lastChunkSize: Int = TCPClient.defaultChunkSize
 
     weak var delegate: TcpClientDelegate?
@@ -86,19 +89,30 @@ final class TCPClient {
                  noDelay: Bool = true,
                  keepAlive: Bool = true,
                  completion: @escaping (Result<Void, Error>) -> Void) {
+        let requestGeneration = nextConnectRequestGeneration()
         let timeoutMs = max(1, timeout)
         let deadline = Date().addingTimeInterval(Double(timeoutMs) / 1000.0)
         resolveAddresses(host: host, timeoutMs: timeoutMs) { result in
             self.queue.async {
                 switch result {
                 case .failure(let error):
+                    guard self.isCurrentConnectRequest(requestGeneration) else {
+                        completion(.failure(TcpError.connectSuperseded))
+                        return
+                    }
                     completion(.failure(error))
                 case .success(let res):
+                    guard self.isCurrentConnectRequest(requestGeneration) else {
+                        freeaddrinfo(res)
+                        completion(.failure(TcpError.connectSuperseded))
+                        return
+                    }
                     self.connectResolvedAddresses(res,
                                                   port: port,
                                                   noDelay: noDelay,
                                                   keepAlive: keepAlive,
                                                   deadline: deadline,
+                                                  requestGeneration: requestGeneration,
                                                   completion: completion)
                 }
             }
@@ -111,8 +125,13 @@ final class TCPClient {
                                           noDelay: Bool,
                                           keepAlive: Bool,
                                           deadline: Date,
+                                          requestGeneration: UInt64,
                                           completion: @escaping (Result<Void, Error>) -> Void) {
         defer { freeaddrinfo(res) }
+        guard isCurrentConnectRequest(requestGeneration) else {
+            completion(.failure(TcpError.connectSuperseded))
+            return
+        }
         self.disconnectInternal(reason: .manual)
 
         var lastErr: Int32 = 0
@@ -120,6 +139,10 @@ final class TCPClient {
 
         var ai: UnsafeMutablePointer<addrinfo>? = res
         while ai != nil, !connected {
+            if !isCurrentConnectRequest(requestGeneration) {
+                completion(.failure(TcpError.connectSuperseded))
+                return
+            }
             guard let aiP = ai?.pointee else { break }
             if deadline.timeIntervalSinceNow <= 0 {
                 lastErr = ETIMEDOUT
@@ -169,6 +192,11 @@ final class TCPClient {
             } else if errno == EINPROGRESS {
                 var pfd = pollfd(fd: s, events: Int16(POLLOUT), revents: 0)
                 while true {
+                    if !self.isCurrentConnectRequest(requestGeneration) {
+                        close(s)
+                        completion(.failure(TcpError.connectSuperseded))
+                        return
+                    }
                     let now = Date()
                     let remain = deadline.timeIntervalSince(now)
                     if remain <= 0 { lastErr = ETIMEDOUT; break }
@@ -196,6 +224,11 @@ final class TCPClient {
             }
 
             if ok {
+                if !isCurrentConnectRequest(requestGeneration) {
+                    close(s)
+                    completion(.failure(TcpError.connectSuperseded))
+                    return
+                }
                 self.fd = s
                 connected = true
             } else {
@@ -218,6 +251,7 @@ final class TCPClient {
     }
 
     func disconnect(completion: (() -> Void)? = nil) {
+        invalidateConnectRequests()
         requestManualDisconnect()
         // Wake an in-flight poll/recv in writeAndRead. Teardown still runs on the
         // serial queue, but shutdown makes the blocking syscall return promptly.
@@ -253,6 +287,25 @@ final class TCPClient {
         signalLock.lock()
         manualDisconnectRequested = true
         signalLock.unlock()
+    }
+
+    private func nextConnectRequestGeneration() -> UInt64 {
+        signalLock.lock()
+        defer { signalLock.unlock() }
+        connectRequestGeneration += 1
+        return connectRequestGeneration
+    }
+
+    private func invalidateConnectRequests() {
+        signalLock.lock()
+        connectRequestGeneration += 1
+        signalLock.unlock()
+    }
+
+    private func isCurrentConnectRequest(_ generation: UInt64) -> Bool {
+        signalLock.lock()
+        defer { signalLock.unlock() }
+        return generation == connectRequestGeneration
     }
 
     private func consumeManualDisconnectRequest() -> Bool {

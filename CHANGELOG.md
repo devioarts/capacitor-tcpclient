@@ -8,12 +8,15 @@
 - Serialized iOS `deinit` teardown through the client queue and made `isConnected()` safe when called from that queue.
 - Made iOS plugin `disconnect()` resolve only after native teardown completes, matching the Android lifecycle guarantee.
 - Bounded iOS DNS resolution by the connect timeout and kept the socket connect phase inside the same total timeout budget.
+- Preserved iOS connect request ordering when DNS resolution completes out of order.
 - Restored the iOS stream reader before resolving `writeAndRead()` promises when RR temporarily suspended streaming.
 - Added iOS byte payload length checks before reserving array capacity and normalized empty byte-array `expect` values to "no expect".
 - Improved iOS POSIX error messages by consistently including `strerror` details.
 - Routed iOS plugin entry points back to the main thread before touching plugin connection state.
 - Added Android write timeout handling, blocked raw writes while a request/response operation is active, and made write watchdogs close the exact socket being written.
 - Protected Android `writeAndRead()` against reconnect/disconnect races by operating on a captured socket generation.
+- Preserved Android connect request ordering when DNS resolution completes out of order.
+- Restored Android idle remote-close detection in `isConnected()` with a non-destructive read probe.
 - Improved Android stream reader start/stop synchronization so cancelled readers do not emit stale chunks after `stopRead()` and readers do not capture stale streams across reconnect.
 - Made Android `disconnect()` resolve only after native teardown completes.
 - Made Android dispose non-blocking for the caller and able to close an in-flight connecting socket so lifecycle teardown cannot leave pending callbacks hanging.

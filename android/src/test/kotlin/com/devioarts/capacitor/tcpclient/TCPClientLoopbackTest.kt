@@ -157,6 +157,24 @@ class TCPClientLoopbackTest {
     }
 
     @Test
+    fun idleRemoteCloseIsDetectedByIsConnected() {
+        loopback {
+            Thread.sleep(50)
+        }.use { server ->
+            val client = TCPClient()
+            val delegate = RecordingDelegate(expectedBytes = 1)
+            client.delegate = delegate
+
+            assertTrue(client.awaitConnect(server.port).isSuccess)
+            Thread.sleep(150)
+
+            assertFalse(client.isConnected())
+            assertTrue(delegate.disconnected.await(2, TimeUnit.SECONDS))
+            assertEquals(TCPClient.DisconnectReason.Remote::class, delegate.disconnectReason!!::class)
+        }
+    }
+
+    @Test
     fun concurrentWriteIsBusyWhileRequestResponseIsInFlight() {
         loopback { socket ->
             socket.getInputStream().readBytes(1)
