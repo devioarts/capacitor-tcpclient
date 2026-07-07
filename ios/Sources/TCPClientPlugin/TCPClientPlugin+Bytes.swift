@@ -2,6 +2,8 @@ import Foundation
 import Capacitor
 
 extension TCPClientPlugin {
+    private static var maxBytePayloadLength: Int { 16 * 1024 * 1024 }
+
     /// Build an optional byte-pattern matcher from the "expect" call parameter.
     func buildMatcher(_ call: CAPPluginCall) throws -> ((Data) -> Bool)? {
         if let hexStr = call.getString("expect") {
@@ -28,7 +30,7 @@ extension TCPClientPlugin {
 
     func bytesFromObject(_ obj: JSObject) -> [UInt8]? {
         let len = objectByteLength(obj)
-        guard len >= 0 else { return nil }
+        guard len >= 0, len <= Self.maxBytePayloadLength else { return nil }
 
         var out = [UInt8]()
         out.reserveCapacity(len)
@@ -62,7 +64,8 @@ extension TCPClientPlugin {
         return matcherFromBytes(Array(pattern))
     }
 
-    private func matcherFromArray(_ arr: [UInt]) throws -> ((Data) -> Bool) {
+    private func matcherFromArray(_ arr: [UInt]) throws -> ((Data) -> Bool)? {
+        if arr.isEmpty { return nil }
         guard let bytes = bytesFromArray(arr) else { throw invalidExpectError("invalid expect (number[])") }
         return matcherFromBytes(bytes)
     }
@@ -77,6 +80,7 @@ extension TCPClientPlugin {
     }
 
     private func bytesFromArray(_ arr: [UInt]) -> [UInt8]? {
+        guard arr.count <= Self.maxBytePayloadLength else { return nil }
         guard arr.allSatisfy({ $0 <= UInt(UInt8.max) }) else { return nil }
         return arr.map { UInt8($0) }
     }

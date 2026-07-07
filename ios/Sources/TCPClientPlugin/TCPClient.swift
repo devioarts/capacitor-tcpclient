@@ -15,6 +15,7 @@ protocol TcpClientDelegate: AnyObject {
 final class TCPClient {
     private static let defaultChunkSize = 4096
     private static let maxBufferBytes = 16 * 1024 * 1024
+    private static let queueKey = DispatchSpecificKey<Void>()
 
     enum TcpError: LocalizedError {
         case notConnected
@@ -55,15 +56,25 @@ final class TCPClient {
     private var readSource: DispatchSourceRead?
     private let queue = DispatchQueue(label: "devioarts.tcpclient", qos: .userInitiated)
     private let signalLock = NSLock()
+    private let operationLock = NSLock()
 
     private var reading = false
     private var rrInFlight = false
+    private var operationInFlight = false
     private var manualDisconnectRequested = false
     private var lastChunkSize: Int = TCPClient.defaultChunkSize
 
     weak var delegate: TcpClientDelegate?
 
-    deinit { disconnectInternal(reason: .manual) }
+    init() {
+        queue.setSpecific(key: Self.queueKey, value: ())
+    }
+
+    deinit {
+        runOnQueueSync {
+            disconnectInternal(reason: .manual)
+        }
+    }
 
     // MARK: - Connect/Disconnect
 
@@ -73,125 +84,133 @@ final class TCPClient {
                  noDelay: Bool = true,
                  keepAlive: Bool = true,
                  completion: @escaping (Result<Void, Error>) -> Void) {
-        queue.async {
-            self.disconnectInternal(reason: .manual)
-
-            var hints = addrinfo(
-                ai_flags: AI_NUMERICHOST,
-                ai_family: AF_UNSPEC,
-                ai_socktype: SOCK_STREAM,
-                ai_protocol: IPPROTO_TCP,
-                ai_addrlen: 0, ai_canonname: nil, ai_addr: nil, ai_next: nil
-            )
-            var res: UnsafeMutablePointer<addrinfo>?
-            let hostC = host.cString(using: .utf8)!
-            if getaddrinfo(hostC, nil, &hints, &res) != 0 {
-                hints.ai_flags = 0
-                if getaddrinfo(hostC, nil, &hints, &res) != 0 {
-                    completion(.failure(TcpError.invalidPort))
-                    return
+        let timeoutMs = max(1, timeout)
+        let deadline = Date().addingTimeInterval(Double(timeoutMs) / 1000.0)
+        resolveAddresses(host: host, timeoutMs: timeoutMs) { result in
+            self.queue.async {
+                switch result {
+                case .failure(let error):
+                    completion(.failure(error))
+                case .success(let res):
+                    self.connectResolvedAddresses(res,
+                                                  port: port,
+                                                  noDelay: noDelay,
+                                                  keepAlive: keepAlive,
+                                                  deadline: deadline,
+                                                  completion: completion)
                 }
             }
-            defer { if res != nil { freeaddrinfo(res) } }
+        }
+    }
 
-            let deadline = Date().addingTimeInterval(Double(max(1, timeout)) / 1000.0)
-            var lastErr: Int32 = 0
-            var connected = false
+    // swiftlint:disable:next function_parameter_count
+    private func connectResolvedAddresses(_ res: UnsafeMutablePointer<addrinfo>,
+                                          port: UInt16,
+                                          noDelay: Bool,
+                                          keepAlive: Bool,
+                                          deadline: Date,
+                                          completion: @escaping (Result<Void, Error>) -> Void) {
+        defer { freeaddrinfo(res) }
+        self.disconnectInternal(reason: .manual)
 
-            var ai = res
-            while ai != nil, !connected {
-                guard let aiP = ai?.pointee else { break }
-                let s = socket(aiP.ai_family, aiP.ai_socktype, aiP.ai_protocol)
-                if s < 0 { lastErr = errno; ai = aiP.ai_next; continue }
+        var lastErr: Int32 = 0
+        var connected = false
 
-                var yes: Int32 = 1
-                if noDelay { _ = setsockopt(s, IPPROTO_TCP, TCP_NODELAY, &yes, socklen_t(MemoryLayout.size(ofValue: yes))) }
-                if keepAlive { _ = setsockopt(s, SOL_SOCKET, SO_KEEPALIVE, &yes, socklen_t(MemoryLayout.size(ofValue: yes))) }
-                _ = setsockopt(s, SOL_SOCKET, SO_NOSIGPIPE, &yes, socklen_t(MemoryLayout.size(ofValue: yes)))
+        var ai: UnsafeMutablePointer<addrinfo>? = res
+        while ai != nil, !connected {
+            guard let aiP = ai?.pointee else { break }
+            if deadline.timeIntervalSinceNow <= 0 {
+                lastErr = ETIMEDOUT
+                break
+            }
+            let s = socket(aiP.ai_family, aiP.ai_socktype, aiP.ai_protocol)
+            if s < 0 { lastErr = errno; ai = aiP.ai_next; continue }
 
-                let flags = fcntl(s, F_GETFL, 0)
-                _ = fcntl(s, F_SETFL, flags | O_NONBLOCK)
+            var yes: Int32 = 1
+            if noDelay { _ = setsockopt(s, IPPROTO_TCP, TCP_NODELAY, &yes, socklen_t(MemoryLayout.size(ofValue: yes))) }
+            if keepAlive { _ = setsockopt(s, SOL_SOCKET, SO_KEEPALIVE, &yes, socklen_t(MemoryLayout.size(ofValue: yes))) }
+            _ = setsockopt(s, SOL_SOCKET, SO_NOSIGPIPE, &yes, socklen_t(MemoryLayout.size(ofValue: yes)))
 
-                var sa = sockaddr_storage()
-                if let src = aiP.ai_addr { memcpy(&sa, src, Int(aiP.ai_addrlen)) }
-                var saLen: socklen_t = 0
+            let flags = fcntl(s, F_GETFL, 0)
+            _ = fcntl(s, F_SETFL, flags | O_NONBLOCK)
 
-                switch Int32(sa.ss_family) {
-                case AF_INET:
-                    var sin = withUnsafePointer(to: &sa) { $0.withMemoryRebound(to: sockaddr_in.self, capacity: 1) { $0.pointee } }
-                    sin.sin_port = CFSwapInt16HostToBig(port)
-                    _ = withUnsafePointer(to: &sin) { p in
-                        p.withMemoryRebound(to: sockaddr.self, capacity: 1) { memcpy(&sa, $0, MemoryLayout<sockaddr_in>.size) }
-                    }
-                    saLen = socklen_t(MemoryLayout<sockaddr_in>.size)
-                case AF_INET6:
-                    var sin6 = withUnsafePointer(to: &sa) { $0.withMemoryRebound(to: sockaddr_in6.self, capacity: 1) { $0.pointee } }
-                    sin6.sin6_port = CFSwapInt16HostToBig(port)
-                    _ = withUnsafePointer(to: &sin6) { p in
-                        p.withMemoryRebound(to: sockaddr.self, capacity: 1) { memcpy(&sa, $0, MemoryLayout<sockaddr_in6>.size) }
-                    }
-                    saLen = socklen_t(MemoryLayout<sockaddr_in6>.size)
-                default:
-                    saLen = socklen_t(aiP.ai_addrlen)
+            var sa = sockaddr_storage()
+            if let src = aiP.ai_addr { memcpy(&sa, src, Int(aiP.ai_addrlen)) }
+            var saLen: socklen_t = 0
+
+            switch Int32(sa.ss_family) {
+            case AF_INET:
+                var sin = withUnsafePointer(to: &sa) { $0.withMemoryRebound(to: sockaddr_in.self, capacity: 1) { $0.pointee } }
+                sin.sin_port = CFSwapInt16HostToBig(port)
+                _ = withUnsafePointer(to: &sin) { p in
+                    p.withMemoryRebound(to: sockaddr.self, capacity: 1) { memcpy(&sa, $0, MemoryLayout<sockaddr_in>.size) }
                 }
-
-                let rc: Int32 = withUnsafePointer(to: &sa) {
-                    $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { Darwin.connect(s, $0, saLen) }
+                saLen = socklen_t(MemoryLayout<sockaddr_in>.size)
+            case AF_INET6:
+                var sin6 = withUnsafePointer(to: &sa) { $0.withMemoryRebound(to: sockaddr_in6.self, capacity: 1) { $0.pointee } }
+                sin6.sin6_port = CFSwapInt16HostToBig(port)
+                _ = withUnsafePointer(to: &sin6) { p in
+                    p.withMemoryRebound(to: sockaddr.self, capacity: 1) { memcpy(&sa, $0, MemoryLayout<sockaddr_in6>.size) }
                 }
+                saLen = socklen_t(MemoryLayout<sockaddr_in6>.size)
+            default:
+                saLen = socklen_t(aiP.ai_addrlen)
+            }
 
-                var ok = false
-                if rc == 0 {
-                    ok = true
-                } else if errno == EINPROGRESS {
-                    var pfd = pollfd(fd: s, events: Int16(POLLOUT), revents: 0)
-                    while true {
-                        let now = Date()
-                        let remain = deadline.timeIntervalSince(now)
-                        if remain <= 0 { lastErr = ETIMEDOUT; break }
-                        let step = min(remain, 0.200) // 200 ms steps
-                        let prc = withUnsafeMutablePointer(to: &pfd) { poll($0, 1, Int32(step * 1000.0)) }
-                        if prc > 0 {
-                            var soErr: Int32 = 0
-                            var slen = socklen_t(MemoryLayout.size(ofValue: soErr))
-                            if getsockopt(s, SOL_SOCKET, SO_ERROR, &soErr, &slen) == 0, soErr == 0 {
-                                ok = true
-                            } else {
-                                lastErr = (soErr != 0) ? soErr : errno
-                            }
-                            break
-                        } else if prc == 0 {
-                            continue
+            let rc: Int32 = withUnsafePointer(to: &sa) {
+                $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { Darwin.connect(s, $0, saLen) }
+            }
+
+            var ok = false
+            if rc == 0 {
+                ok = true
+            } else if errno == EINPROGRESS {
+                var pfd = pollfd(fd: s, events: Int16(POLLOUT), revents: 0)
+                while true {
+                    let now = Date()
+                    let remain = deadline.timeIntervalSince(now)
+                    if remain <= 0 { lastErr = ETIMEDOUT; break }
+                    let step = min(remain, 0.200) // 200 ms steps
+                    let prc = withUnsafeMutablePointer(to: &pfd) { poll($0, 1, Int32(step * 1000.0)) }
+                    if prc > 0 {
+                        var soErr: Int32 = 0
+                        var slen = socklen_t(MemoryLayout.size(ofValue: soErr))
+                        if getsockopt(s, SOL_SOCKET, SO_ERROR, &soErr, &slen) == 0, soErr == 0 {
+                            ok = true
                         } else {
-                            if errno == EINTR { continue }
-                            lastErr = errno
-                            break
+                            lastErr = (soErr != 0) ? soErr : errno
                         }
+                        break
+                    } else if prc == 0 {
+                        continue
+                    } else {
+                        if errno == EINTR { continue }
+                        lastErr = errno
+                        break
                     }
-                } else {
-                    lastErr = errno
                 }
-
-                if ok {
-                    self.fd = s
-                    connected = true
-                } else {
-                    close(s)
-                    ai = aiP.ai_next
-                }
+            } else {
+                lastErr = errno
             }
 
-            if connected {
-                completion(.success(()))
+            if ok {
+                self.fd = s
+                connected = true
             } else {
-                if lastErr == ETIMEDOUT {
-                    completion(.failure(TcpError.connectTimeout))
-                } else if lastErr != 0 {
-                    let msg = String(cString: strerror(lastErr))
-                    let err = NSError(domain: NSPOSIXErrorDomain, code: Int(lastErr), userInfo: [NSLocalizedDescriptionKey: msg])
-                    completion(.failure(err))
-                } else {
-                    completion(.failure(TcpError.connectTimeout))
-                }
+                close(s)
+                ai = aiP.ai_next
+            }
+        }
+
+        if connected {
+            completion(.success(()))
+        } else {
+            if lastErr == ETIMEDOUT {
+                completion(.failure(TcpError.connectTimeout))
+            } else if lastErr != 0 {
+                completion(.failure(posixError(lastErr)))
+            } else {
+                completion(.failure(TcpError.connectTimeout))
             }
         }
     }
@@ -200,7 +219,7 @@ final class TCPClient {
         requestManualDisconnect()
         // Wake an in-flight poll/recv in writeAndRead. Teardown still runs on the
         // serial queue, but shutdown makes the blocking syscall return promptly.
-        let wakeFd = fd
+        let wakeFd = runOnQueueSync { fd }
         if wakeFd >= 0 { _ = shutdown(wakeFd, SHUT_RDWR) }
         queue.async { self.disconnectInternal(reason: .manual) }
     }
@@ -242,28 +261,24 @@ final class TCPClient {
     /// Robust connectivity check without a running reader:
     /// uses non-blocking MSG_PEEK to detect EOF immediately.
     func isConnected() -> Bool {
-        var ok = false
-        queue.sync {
-            guard fd >= 0 else { ok = false; return }
+        return runOnQueueSync {
+            guard fd >= 0 else { return false }
 
-            if reading || rrInFlight { ok = true; return }
+            if reading || rrInFlight { return true }
 
             var p = pollfd(fd: fd, events: Int16(POLLIN | POLLERR | POLLHUP | POLLNVAL), revents: 0)
             let rc = withUnsafeMutablePointer(to: &p) { poll($0, 1, 0) }
             if rc < 0 {
                 let e = errno
                 if e == EINTR {
-                    ok = true
-                    return
+                    return true
                 }
-                self.disconnectInternal(reason: .error(NSError(domain: NSPOSIXErrorDomain, code: Int(e))))
-                ok = false
-                return
+                self.disconnectInternal(reason: .error(self.posixError(e)))
+                return false
             }
             if (p.revents & Int16(POLLERR | POLLHUP | POLLNVAL)) != 0 {
                 self.disconnectInternal(reason: .remote)
-                ok = false
-                return
+                return false
             }
 
             var c: UInt8 = 0
@@ -274,18 +289,18 @@ final class TCPClient {
 
             if n == 0 {
                 self.disconnectInternal(reason: .remote)
-                ok = false
+                return false
             } else if n > 0 {
-                ok = true
+                return true
             } else {
                 let e = errno
-                ok = (e == EAGAIN || e == EWOULDBLOCK || e == EINTR)
+                let ok = (e == EAGAIN || e == EWOULDBLOCK || e == EINTR)
                 if !ok {
-                    self.disconnectInternal(reason: .error(NSError(domain: NSPOSIXErrorDomain, code: Int(e))))
+                    self.disconnectInternal(reason: .error(self.posixError(e)))
                 }
+                return ok
             }
         }
-        return ok
     }
 
     // MARK: - Low-level send helper (automatic POLLOUT backoff)
@@ -324,14 +339,12 @@ final class TCPClient {
                     if prc < 0 {
                         let perr = errno
                         if perr == EINTR { continue }
-                        throw NSError(domain: NSPOSIXErrorDomain, code: Int(perr),
-                                      userInfo: [NSLocalizedDescriptionKey: String(cString: strerror(perr))])
+                        throw posixError(perr)
                     }
                     // prc == 0 => timed step; loop until deadline
                 }
             } else {
-                throw NSError(domain: NSPOSIXErrorDomain, code: Int(e),
-                              userInfo: [NSLocalizedDescriptionKey: String(cString: strerror(e))])
+                throw posixError(e)
             }
         }
         return sent
@@ -340,7 +353,9 @@ final class TCPClient {
     // MARK: - Write
 
     func write(_ bytes: [UInt8], completion: @escaping (Result<Int, Error>) -> Void) {
+        guard beginOperation() else { completion(.failure(TcpError.busy)); return }
         queue.async {
+            defer { self.endOperation() }
             guard self.fd >= 0 else { completion(.failure(TcpError.notConnected)); return }
             if self.rrInFlight { completion(.failure(TcpError.busy)); return }
             do {
@@ -360,38 +375,7 @@ final class TCPClient {
 
     func startRead(chunkSize: Int = 4096) {
         queue.async {
-            guard self.fd >= 0 else { return }
-            if self.reading { return }
-            self.reading = true
-            self.lastChunkSize = min(max(1, chunkSize), Self.maxBufferBytes)
-
-            let src = DispatchSource.makeReadSource(fileDescriptor: self.fd, queue: self.queue)
-            src.setEventHandler { [weak self] in
-                guard let self = self else { return }
-                let size = self.lastChunkSize
-                var buf = [UInt8](repeating: 0, count: size)
-                while true {
-                    let n = buf.withUnsafeMutableBytes { p -> Int in
-                        guard let base = p.baseAddress else { return -1 }
-                        return Darwin.recv(self.fd, base, p.count, 0)
-                    }
-                    if n > 0 {
-                        self.delegate?.tcpClient(self, didReceive: Data(buf[0..<n]))
-                        continue
-                    } else if n == 0 {
-                        self.disconnectInternal(reason: .remote)
-                        break
-                    } else {
-                        let e = errno
-                        if e == EAGAIN || e == EWOULDBLOCK { break }
-                        if e == EINTR { continue }
-                        self.disconnectInternal(reason: .error(NSError(domain: NSPOSIXErrorDomain, code: Int(e))))
-                        break
-                    }
-                }
-            }
-            self.readSource = src
-            src.resume()
+            self.startReadInternal(chunkSize: chunkSize)
         }
     }
 
@@ -403,7 +387,7 @@ final class TCPClient {
         }
     }
 
-    func isReading() -> Bool { return reading }
+    func isReading() -> Bool { runOnQueueSync { reading } }
 
     // MARK: - Write & wait for pattern (RR) with adaptive "until idle"
 
@@ -416,11 +400,11 @@ final class TCPClient {
                       expect: ((Data) -> Bool)? = nil,
                       suspendStreamDuringRR: Bool = true,
                       completion: @escaping (Result<ReadResult, Error>) -> Void) {
+        guard beginOperation() else { completion(.failure(TcpError.busy)); return }
         queue.async {
-            guard self.fd >= 0 else { completion(.failure(TcpError.notConnected)); return }
-            guard !self.rrInFlight else { completion(.failure(TcpError.busy)); return }
+            guard self.fd >= 0 else { self.endOperation(); completion(.failure(TcpError.notConnected)); return }
+            guard !self.rrInFlight else { self.endOperation(); completion(.failure(TcpError.busy)); return }
             self.rrInFlight = true
-            func finish(_ r: Result<ReadResult, Error>) { self.rrInFlight = false; completion(r) }
 
             let wasReading = self.reading
             if suspendStreamDuringRR && wasReading {
@@ -429,6 +413,17 @@ final class TCPClient {
                 self.reading = false
                 self.readSource?.cancel()
                 self.readSource = nil
+            }
+            func restoreReaderIfNeeded() {
+                if suspendStreamDuringRR && wasReading && self.fd >= 0 {
+                    self.startReadInternal(chunkSize: self.lastChunkSize)
+                }
+            }
+            func finish(_ r: Result<ReadResult, Error>) {
+                restoreReaderIfNeeded()
+                self.rrInFlight = false
+                self.endOperation()
+                completion(r)
             }
 
             // Send phase (budget = timeout)
@@ -439,7 +434,6 @@ final class TCPClient {
                     self.disconnectInternal(reason: .remote)
                 }
                 finish(.failure(error))
-                if suspendStreamDuringRR && wasReading && self.fd >= 0 { self.startRead(chunkSize: self.lastChunkSize) }
                 return
             }
 
@@ -482,7 +476,6 @@ final class TCPClient {
                         let idleMs = Int(Date().timeIntervalSince(lastDataTime) * 1000.0)
                         if idleMs >= currentIdleThresholdMs() {
                             finish(.success(ReadResult(data: out, matched: false)))
-                            if suspendStreamDuringRR && wasReading && self.fd >= 0 { self.startRead(chunkSize: self.lastChunkSize) }
                             return
                         }
                     }
@@ -491,8 +484,7 @@ final class TCPClient {
                 if rc < 0 {
                     let e = errno
                     if e == EINTR { continue }
-                    finish(.failure(NSError(domain: NSPOSIXErrorDomain, code: Int(e))))
-                    if suspendStreamDuringRR && wasReading && self.fd >= 0 { self.startRead(chunkSize: self.lastChunkSize) }
+                    finish(.failure(self.posixError(e)))
                     return
                 }
 
@@ -520,15 +512,18 @@ final class TCPClient {
                     }
                 } else if n == 0 {
                     self.disconnectInternal(reason: .remote)
-                    finish(.failure(TcpError.closed))
-                    if suspendStreamDuringRR && wasReading && self.fd >= 0 { self.startRead(chunkSize: self.lastChunkSize) }
+                    if out.isEmpty {
+                        finish(.failure(TcpError.closed))
+                    } else {
+                        finish(.success(ReadResult(data: out, matched: matched)))
+                    }
                     return
                 } else {
                     let e = errno
                     if e == EAGAIN || e == EWOULDBLOCK || e == EINTR { continue }
-                    self.disconnectInternal(reason: .error(NSError(domain: NSPOSIXErrorDomain, code: Int(e))))
-                    finish(.failure(NSError(domain: NSPOSIXErrorDomain, code: Int(e))))
-                    if suspendStreamDuringRR && wasReading && self.fd >= 0 { self.startRead(chunkSize: self.lastChunkSize) }
+                    let error = self.posixError(e)
+                    self.disconnectInternal(reason: .error(error))
+                    finish(.failure(error))
                     return
                 }
             }
@@ -538,10 +533,113 @@ final class TCPClient {
             } else {
                 finish(.success(ReadResult(data: out, matched: matched)))
             }
+        }
+    }
 
-            if suspendStreamDuringRR && wasReading && self.fd >= 0 {
-                self.startRead(chunkSize: self.lastChunkSize)
+    private func startReadInternal(chunkSize: Int) {
+        guard fd >= 0 else { return }
+        if reading { return }
+        reading = true
+        lastChunkSize = min(max(1, chunkSize), Self.maxBufferBytes)
+
+        let src = DispatchSource.makeReadSource(fileDescriptor: fd, queue: queue)
+        src.setEventHandler { [weak self] in
+            guard let self = self else { return }
+            let size = self.lastChunkSize
+            var buf = [UInt8](repeating: 0, count: size)
+            while true {
+                let n = buf.withUnsafeMutableBytes { p -> Int in
+                    guard let base = p.baseAddress else { return -1 }
+                    return Darwin.recv(self.fd, base, p.count, 0)
+                }
+                if n > 0 {
+                    self.delegate?.tcpClient(self, didReceive: Data(buf[0..<n]))
+                    continue
+                } else if n == 0 {
+                    self.disconnectInternal(reason: .remote)
+                    break
+                } else {
+                    let e = errno
+                    if e == EAGAIN || e == EWOULDBLOCK { break }
+                    if e == EINTR { continue }
+                    self.disconnectInternal(reason: .error(self.posixError(e)))
+                    break
+                }
             }
         }
+        readSource = src
+        src.resume()
+    }
+
+    private func resolveAddresses(host: String,
+                                  timeoutMs: Int,
+                                  completion: @escaping (Result<UnsafeMutablePointer<addrinfo>, Error>) -> Void) {
+        let lock = NSLock()
+        var settled = false
+
+        func settle(_ result: Result<UnsafeMutablePointer<addrinfo>, Error>) -> Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            if settled { return false }
+            settled = true
+            completion(result)
+            return true
+        }
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            var hints = addrinfo(
+                ai_flags: AI_NUMERICHOST,
+                ai_family: AF_UNSPEC,
+                ai_socktype: SOCK_STREAM,
+                ai_protocol: IPPROTO_TCP,
+                ai_addrlen: 0, ai_canonname: nil, ai_addr: nil, ai_next: nil
+            )
+            var res: UnsafeMutablePointer<addrinfo>?
+            let hostC = host.cString(using: .utf8)!
+            var rc = getaddrinfo(hostC, nil, &hints, &res)
+            if rc != 0 {
+                hints.ai_flags = 0
+                rc = getaddrinfo(hostC, nil, &hints, &res)
+            }
+
+            if rc == 0, let resolved = res {
+                if !settle(.success(resolved)) {
+                    freeaddrinfo(resolved)
+                }
+            } else {
+                _ = settle(.failure(TcpError.invalidPort))
+            }
+        }
+
+        DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + .milliseconds(timeoutMs)) {
+            _ = settle(.failure(TcpError.connectTimeout))
+        }
+    }
+
+    private func runOnQueueSync<T>(_ work: () -> T) -> T {
+        if DispatchQueue.getSpecific(key: Self.queueKey) != nil {
+            return work()
+        }
+        return queue.sync(execute: work)
+    }
+
+    private func beginOperation() -> Bool {
+        operationLock.lock()
+        defer { operationLock.unlock() }
+        if operationInFlight { return false }
+        operationInFlight = true
+        return true
+    }
+
+    private func endOperation() {
+        operationLock.lock()
+        operationInFlight = false
+        operationLock.unlock()
+    }
+
+    private func posixError(_ code: Int32) -> NSError {
+        NSError(domain: NSPOSIXErrorDomain,
+                code: Int(code),
+                userInfo: [NSLocalizedDescriptionKey: String(cString: strerror(code))])
     }
 }

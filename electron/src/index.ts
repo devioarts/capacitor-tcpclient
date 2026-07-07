@@ -32,8 +32,11 @@ type ParsedExpect = { ok: true; bytes: Uint8Array | null } | { ok: false };
 
 function parseExpectBytes(expect: ExpectInput): ParsedExpect {
   if (expect == null || expect === '') return { ok: true, bytes: null };
-  if (expect instanceof Uint8Array) return { ok: true, bytes: new Uint8Array(expect) };
+  if (expect instanceof Uint8Array) {
+    return { ok: true, bytes: expect.length === 0 ? null : new Uint8Array(expect) };
+  }
   if (Array.isArray(expect)) {
+    if (expect.length === 0) return { ok: true, bytes: null };
     const out = new Uint8Array(expect.length);
     for (let i = 0; i < expect.length; i++) {
       const value = expect[i];
@@ -100,6 +103,7 @@ interface SocketState {
   sock: net.Socket | null;
   reading: boolean;
   rrInFlight: boolean;
+  ioInFlight: boolean;
   connectInFlight: boolean;
   streamDataHandler?: (chunk: Buffer) => void;
   socketErrorHandler?: (err: Error) => void;
@@ -118,6 +122,7 @@ function makeState(): SocketState {
     sock: null,
     reading: false,
     rrInFlight: false,
+    ioInFlight: false,
     connectInFlight: false,
     lastSocketError: null,
     lastChunkSize: DEFAULT_CHUNK_SIZE,
@@ -156,20 +161,12 @@ function makeState(): SocketState {
 export class TCPClient {
   private webContents: WebContents | null = null;
   private conns = new Map<string, SocketState>();
-  private listenerCounts = new Map<string, number>();
+  private pendingReadTimeouts = new Map<string, number>();
 
   constructor() {
-    ipcMain.on('event-add-TCPClient', (event, type: unknown) => {
+    ipcMain.on('event-add-TCPClient', (event) => {
       this.attachWebContents(event.sender);
-      const t = type as string;
-      this.listenerCounts.set(t, (this.listenerCounts.get(t) ?? 0) + 1);
     });
-    for (const ev of ['tcpData', 'tcpDisconnect'] as const) {
-      ipcMain.on(`event-remove-TCPClient-${ev}`, () => {
-        const c = (this.listenerCounts.get(ev) ?? 1) - 1;
-        this.listenerCounts.set(ev, Math.max(0, c));
-      });
-    }
   }
 
   // ---- internal helpers ---------------------------------------------------
@@ -181,7 +178,6 @@ export class TCPClient {
     webContents.once('destroyed', () => {
       if (this.webContents === webContents) {
         this.webContents = null;
-        this.listenerCounts.clear();
       }
     });
   }
@@ -190,21 +186,20 @@ export class TCPClient {
     let st = this.conns.get(connectionId);
     if (!st) {
       st = makeState();
+      const pendingReadTimeout = this.pendingReadTimeouts.get(connectionId);
+      if (pendingReadTimeout != null) st.readTimeout = pendingReadTimeout;
       this.conns.set(connectionId, st);
     }
     return st;
   }
 
   private sendEvent(connectionId: string, name: 'tcpData' | 'tcpDisconnect', payload: object) {
-    if ((this.listenerCounts.get(name) ?? 0) <= 0) return;
-
     const webContents = this.webContents;
     if (!webContents) return;
 
     if (webContents.isDestroyed()) {
       if (this.webContents === webContents) {
         this.webContents = null;
-        this.listenerCounts.clear();
       }
       return;
     }
@@ -214,7 +209,6 @@ export class TCPClient {
     } catch {
       if (this.webContents === webContents) {
         this.webContents = null;
-        this.listenerCounts.clear();
       }
     }
   }
@@ -229,8 +223,12 @@ export class TCPClient {
   }
 
   private jsArrToBuf(arr: unknown) {
-    if (arr instanceof Uint8Array) return Buffer.from(arr);
+    if (arr instanceof Uint8Array) {
+      if (arr.length > MAX_BUFFER_BYTES) return null;
+      return Buffer.from(arr);
+    }
     if (!Array.isArray(arr)) return null;
+    if (arr.length > MAX_BUFFER_BYTES) return null;
     const out = Buffer.alloc(arr.length);
     for (let i = 0; i < arr.length; i++) {
       const value = arr[i];
@@ -269,6 +267,7 @@ export class TCPClient {
       this.flushPendingNow(connectionId, st);
       st.reading = false;
       st.rrInFlight = false;
+      st.ioInFlight = false;
       if (st.sock === s) st.sock = null;
 
       const err = st.lastSocketError;
@@ -325,6 +324,7 @@ export class TCPClient {
     return new Promise<Std<{ bytesSent: number }>>((resolve) => {
       let settled = false;
       let timer: NodeJS.Timeout | null = null;
+      let socketError: Error | null = null;
 
       // write callback, socket error, close, and watchdog can race; settle once
       // and leave the permanent lifecycle handler to translate final disconnect.
@@ -348,14 +348,17 @@ export class TCPClient {
         resolve(result);
       };
 
-      const onError = (err: Error) => settle(fail(`write failed: ${err.message}`, { bytesSent: 0 }));
+      const onError = (err: Error) => {
+        socketError = err;
+        settle(fail(`write failed: ${err.message}`, { bytesSent: 0 }));
+      };
       const onClose = () => {
-        const err = st.lastSocketError;
+        const err = socketError ?? st.lastSocketError;
         settle(fail(err ? `connection closed: ${err.message}` : 'connection closed', { bytesSent: 0 }));
       };
 
       s.once('error', onError);
-      s.once('close', onClose);
+      s.prependOnceListener('close', onClose);
       timer = setTimeout(() => settle(fail('write timeout', { bytesSent: 0 }), true), timeoutMs);
 
       s.write(buf, (err) => {
@@ -402,6 +405,7 @@ export class TCPClient {
     await this.disconnect({ connectionId });
     st.reading = false;
     st.rrInFlight = false;
+    st.ioInFlight = false;
 
     return new Promise<Std<{ connected: boolean }>>((resolve) => {
       const s = new net.Socket();
@@ -493,6 +497,7 @@ export class TCPClient {
     st.sock = null;
     st.reading = false;
     st.rrInFlight = false;
+    st.ioInFlight = false;
 
     if (s) {
       this.detachRuntimeSocketHandlers(st, s);
@@ -524,11 +529,16 @@ export class TCPClient {
   async write(args: { connectionId: string; data: number[] }): Promise<Std<{ bytesSent: number }>> {
     const st = this.conns.get(args.connectionId);
     if (!st || !this.isOpen(st) || !st.sock) return fail('not connected', { bytesSent: 0 });
-    if (st.rrInFlight) return fail('busy', { bytesSent: 0 });
+    if (st.ioInFlight || st.rrInFlight) return fail('busy', { bytesSent: 0 });
 
     const buf = this.jsArrToBuf(args.data ?? []);
     if (!buf) return fail('data must be an array of bytes', { bytesSent: 0 });
-    return this.writeBufferWithTimeout(st, st.sock, buf, WRITE_TIMEOUT_MS);
+    st.ioInFlight = true;
+    try {
+      return await this.writeBufferWithTimeout(st, st.sock, buf, WRITE_TIMEOUT_MS);
+    } finally {
+      st.ioInFlight = false;
+    }
   }
 
   async startRead(args: {
@@ -579,8 +589,10 @@ export class TCPClient {
   }
 
   async setReadTimeout(args: { connectionId: string; readTimeout: number }): Promise<Std> {
-    const st = this.getOrCreate(args.connectionId);
-    st.readTimeout = this.positiveInt(args?.readTimeout, 1000, 1, MAX_TIMER_MS);
+    const timeout = this.positiveInt(args?.readTimeout, 1000, 1, MAX_TIMER_MS);
+    const st = this.conns.get(args.connectionId);
+    if (st) st.readTimeout = timeout;
+    else this.pendingReadTimeouts.set(args.connectionId, timeout);
     return ok();
   }
 
@@ -591,6 +603,7 @@ export class TCPClient {
   async destroyConnection(args: { connectionId: string }): Promise<Std> {
     await this.disconnect(args);
     this.conns.delete(args.connectionId);
+    this.pendingReadTimeouts.delete(args.connectionId);
     return ok();
   }
 
@@ -608,7 +621,7 @@ export class TCPClient {
     if (!st || !this.isOpen(st) || !st.sock) {
       return fail('not connected', { data: [], bytesSent: 0, bytesReceived: 0, matched: false });
     }
-    if (st.rrInFlight) {
+    if (st.ioInFlight || st.rrInFlight) {
       return fail('busy', { data: [], bytesSent: 0, bytesReceived: 0, matched: false });
     }
 
@@ -629,6 +642,7 @@ export class TCPClient {
       return fail('data must be an array of bytes', { data: [], bytesSent: 0, bytesReceived: 0, matched: false });
     }
     st.rrInFlight = true;
+    st.ioInFlight = true;
 
     const s = st.sock!;
     const wasReading = st.reading;
@@ -650,6 +664,7 @@ export class TCPClient {
         let idleTimer: NodeJS.Timeout | null = null;
         let settled = false;
         let writeFinished = false;
+        let socketError: Error | null = null;
 
         const chunks: Buffer[] = [];
         let size = 0;
@@ -697,6 +712,7 @@ export class TCPClient {
             s.on('data', suspendedStreamDataHandler);
           }
           st.rrInFlight = false;
+          st.ioInFlight = false;
 
           if (err) {
             const isTimeout = err === 'timeout';
@@ -708,8 +724,10 @@ export class TCPClient {
         };
 
         const onData = (chunk: Buffer) => {
-          chunks.push(chunk);
-          size += chunk.length;
+          const remaining = cap - size;
+          const accepted = remaining > 0 && chunk.length > remaining ? chunk.subarray(0, remaining) : chunk;
+          chunks.push(accepted);
+          size += accepted.length;
 
           const now = Date.now();
           if (lastDataAt > 0) {
@@ -745,10 +763,17 @@ export class TCPClient {
           armIdle();
         };
 
-        const onError = (err: Error) => finish(null, `writeAndRead failed: ${err.message}`);
+        const onError = (err: Error) => {
+          socketError = err;
+          finish(null, `writeAndRead failed: ${err.message}`);
+        };
         const onClose = () => {
-          const err = st.lastSocketError;
-          finish(null, err ? `connection closed: ${err.message}` : 'connection closed');
+          const err = socketError ?? st.lastSocketError;
+          if (size > 0) {
+            finish(Buffer.concat(chunks, Math.min(size, cap)));
+          } else {
+            finish(null, err ? `connection closed: ${err.message}` : 'connection closed');
+          }
         };
 
         timer = setTimeout(() => {
@@ -769,7 +794,7 @@ export class TCPClient {
 
         s.on('data', onData);
         s.once('error', onError);
-        s.once('close', onClose);
+        s.prependOnceListener('close', onClose);
 
         s.write(reqBuf, (err) => {
           writeFinished = true;

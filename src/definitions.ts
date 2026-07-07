@@ -16,7 +16,11 @@ import type { PluginListenerHandle } from '@capacitor/core';
  * - Defaults: port=9100, connect timeout=3000ms, stream chunkSize=4096 bytes,
  *   RR timeout=1000ms, RR maxBytes=4096, TCP_NODELAY=true, SO_KEEPALIVE=true.
  * - Byte payloads must contain integer values in the 0..255 range.
+ * - Empty `expect` values (`""`, `[]`, or an empty Uint8Array) are treated as if
+ *   `expect` was omitted.
  * - Native/Electron implementations cap stream chunks and RR buffers at 16 MiB.
+ * - `errorMessage` is diagnostic text and can vary by platform/OS; do not parse it
+ *   as a stable machine-readable error code.
  */
 
 /* ====== Connect ====== */
@@ -26,7 +30,7 @@ export interface TcpConnectOptions {
   host: string;
   /** TCP port, default 9100. Valid range 1..65535. */
   port?: number;
-  /** Connect timeout in milliseconds, default 3000. */
+  /** Connect timeout in milliseconds, default 3000. Includes DNS and socket connect budget. */
   timeout?: number;
   /** Enable TCP_NODELAY (Nagle off). Default true. */
   noDelay?: boolean;
@@ -121,6 +125,7 @@ export interface TcpWriteAndReadOptions {
   /**
    * Optional pattern — reading stops when found.
    * Accepts number[] / Uint8Array or hex string (e.g. "1B40", "0x1b 0x40").
+   * Empty values are treated as no expect pattern.
    */
   expect?: TcpBytePayload | string;
   /** Suspend stream reader during RR to avoid consuming reply. Default true. */
@@ -182,7 +187,7 @@ export interface TCPConnection {
    */
   connect(options?: Partial<TcpConnectOptions>): Promise<TcpConnectResult>;
 
-  /** Close the socket. Idempotent. Emits tcpDisconnect(reason: manual). */
+  /** Close the socket. Idempotent. Resolves after native teardown completes. Emits tcpDisconnect(reason: manual). */
   disconnect(): Promise<TcpDisconnectResult>;
 
   isConnected(): Promise<TcpIsConnectedResult>;
@@ -198,7 +203,8 @@ export interface TCPConnection {
    * Configure stream read timeout.
    * - Android: sets `SO_TIMEOUT` on the continuous reader socket (applies during `startRead`).
    * - iOS: no-op (evented I/O, no blocking timeout).
-   * - Electron: sets the default `timeout` value used by `writeAndRead` when no explicit timeout is passed.
+   * - Electron: sets the default `timeout` value used by `writeAndRead` when no explicit timeout is passed;
+   *   if called before connect, the default is stored without creating a socket state entry.
    */
   setReadTimeout(options: { readTimeout: number }): Promise<{ error: boolean; errorMessage?: string | null }>;
 
@@ -214,7 +220,7 @@ export interface TCPConnection {
   /** Remove all listeners registered through this instance. */
   removeAllListeners(): Promise<void>;
 
-  /** Disconnect, remove all listeners, and release this instance from the registry. */
+  /** Disconnect, remove all listeners, and release this instance from the registry even if listener cleanup fails. */
   destroy(): Promise<void>;
 }
 

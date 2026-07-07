@@ -20,6 +20,7 @@ import org.json.JSONObject
  * - Incoming JS values must already be integer bytes in the 0..255 range.
  */
 object Helpers {
+    private const val MAX_BUFFER_BYTES = 16 * 1024 * 1024
 
     /** Build ByteArray from {"0":72, "1":101, ...} (optionally with "length"). Returns null on invalid shape. */
     fun jsonObjectToBytes(obj: JSONObject): ByteArray? {
@@ -36,7 +37,7 @@ object Helpers {
             }
             max + 1
         }
-        if (len < 0) return null
+        if (len < 0 || len > MAX_BUFFER_BYTES) return null
 
         val out = ByteArray(len)
         for (i in 0 until len) {
@@ -61,6 +62,7 @@ object Helpers {
      */
     fun jsArrayToBytes(arr: JSArray): ByteArray? {
         val len = arr.length()
+        if (len > MAX_BUFFER_BYTES) return null
         val out = ByteArray(len)
         for (i in 0 until len) {
             try {

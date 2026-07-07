@@ -22,10 +22,11 @@ export function parseExpectBytes(expect: ExpectInput): Uint8Array | null {
 
   if (expect instanceof Uint8Array) {
     // Defensive copy so callers can safely mutate their original.
-    return new Uint8Array(expect);
+    return expect.length === 0 ? null : new Uint8Array(expect);
   }
 
   if (Array.isArray(expect)) {
+    if (expect.length === 0) return null;
     const out = new Uint8Array(expect.length);
     for (let i = 0; i < expect.length; i++) {
       const value = expect[i];

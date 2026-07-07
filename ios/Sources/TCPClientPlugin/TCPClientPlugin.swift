@@ -70,6 +70,7 @@ public class TCPClientPlugin: CAPPlugin, CAPBridgedPlugin {
         guard let tcpError = error as? TCPClient.TcpError else { return 0 }
         switch tcpError {
         case .readTimeout:
+            // A read timeout is only reported after the request was fully written.
             return requestedByteCount
         case .writeTimeout(let sent):
             return sent

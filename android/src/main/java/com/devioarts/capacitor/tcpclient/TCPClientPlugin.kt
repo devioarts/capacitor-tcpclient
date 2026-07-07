@@ -84,8 +84,13 @@ class TCPClientPlugin : Plugin() {
     fun disconnect(call: PluginCall) {
         val id = requireId(call) ?: return
         connections[id]?.let { state ->
-            state.client.disconnect()
-            runOnMain { flushPendingNow(id) }
+            state.client.disconnect {
+                runOnMain {
+                    flushPendingNow(id)
+                    call.resolve(JSObject().put("error", false).put("errorMessage", JSObject.NULL).put("disconnected", true).put("reading", false))
+                }
+            }
+            return
         }
         call.resolve(JSObject().put("error", false).put("errorMessage", JSObject.NULL).put("disconnected", true).put("reading", false))
     }
@@ -115,7 +120,7 @@ class TCPClientPlugin : Plugin() {
         }
         state.client.write(bytes) { res ->
             val obj = JSObject()
-            if (res.isSuccess) obj.put("error", false).put("errorMessage", null).put("bytesSent", res.getOrNull())
+            if (res.isSuccess) obj.put("error", false).put("errorMessage", JSObject.NULL).put("bytesSent", res.getOrNull())
             else               obj.put("error", true).put("errorMessage", "write failed: ${res.exceptionOrNull()?.message}").put("bytesSent", 0)
             runOnMain { call.resolve(obj) }
         }
@@ -191,7 +196,7 @@ class TCPClientPlugin : Plugin() {
                     call.resolve(JSObject().put("error", true).put("errorMessage", "invalid expect (number[])")
                         .put("bytesSent", 0).put("bytesReceived", 0).put("data", JSArray()).put("matched", false)); return
                 }
-                matcher = { buf, used -> Helpers.indexOfRange(buf, used, pat) >= 0 }
+                matcher = if (pat.isEmpty()) null else { buf, used -> Helpers.indexOfRange(buf, used, pat) >= 0 }
             } else {
                 val expectObj = call.getObject("expect")
                 if (expectObj != null) {
@@ -199,7 +204,7 @@ class TCPClientPlugin : Plugin() {
                         call.resolve(JSObject().put("error", true).put("errorMessage", "invalid expect (byte object)")
                             .put("bytesSent", 0).put("bytesReceived", 0).put("data", JSArray()).put("matched", false)); return
                     }
-                    matcher = { buf, used -> Helpers.indexOfRange(buf, used, pat) >= 0 }
+                    matcher = if (pat.isEmpty()) null else { buf, used -> Helpers.indexOfRange(buf, used, pat) >= 0 }
                 } else if (call.getData().has("expect") && !call.getData().isNull("expect")) {
                     call.resolve(JSObject().put("error", true).put("errorMessage", "invalid expect (hex or byte array expected)")
                         .put("bytesSent", 0).put("bytesReceived", 0).put("data", JSArray()).put("matched", false)); return
@@ -210,7 +215,13 @@ class TCPClientPlugin : Plugin() {
         state.client.writeAndRead(bytes, timeout, maxBytes, matcher, suspendRR) { res ->
             val obj = JSObject()
             if (res.isSuccess) {
-                val rr = res.getOrNull()!!
+                val rr = res.getOrNull() ?: run {
+                    obj.put("error", true).put("errorMessage", "writeAndRead failed: missing result")
+                        .put("bytesSent", 0).put("bytesReceived", 0)
+                        .put("data", JSArray()).put("matched", false)
+                    runOnMain { call.resolve(obj) }
+                    return@writeAndRead
+                }
                 obj.put("error", false).put("errorMessage", JSObject.NULL)
                     .put("bytesSent", bytes.size).put("bytesReceived", rr.data.size)
                     .put("data", Helpers.bytesToJSArray(rr.data)).put("matched", rr.matched)
@@ -230,7 +241,8 @@ class TCPClientPlugin : Plugin() {
         val id = call.getString("connectionId") ?: run { call.resolve(); return }
         connections.remove(id)?.let { state ->
             mainHandler.removeCallbacks(state.flushRunnable)
-            state.client.dispose()
+            state.client.dispose { runOnMain { call.resolve() } }
+            return
         }
         call.resolve()
     }
