@@ -1,7 +1,19 @@
 .claude
+
+# Local env files
+.env
+.env.*
+!.env.example
+
 # node files
 dist
 node_modules
+coverage
+*.tgz
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
 
 # Generated playground platforms
 playground/electron
